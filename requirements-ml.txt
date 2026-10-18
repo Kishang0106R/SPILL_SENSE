@@ -1,0 +1,6 @@
+# Heavy ML training/inference stack (optional).
+# Required only to run the REAL UNet inference or to train the model.
+# The Spill Sense app still runs the full pipeline end-to-end in demo mode
+# without these installed.
+torch>=2.2
+opencv-python-headless>=4.8.0

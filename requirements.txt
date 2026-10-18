@@ -1,0 +1,13 @@
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.7.0
+psycopg[binary]>=3.2.0
+
+# ---------------------------------------------------------------
+# ML detection pipeline (UNet + DBSCAN)
+# numpy/scikit-learn/Pillow power the demo pipeline and real DBSCAN.
+# PyTorch itself is heavy (~2GB) and lives in requirements-ml.txt.
+# ---------------------------------------------------------------
+numpy>=1.26
+scikit-learn>=1.4
+Pillow>=10.0

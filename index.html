@@ -1,0 +1,1213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SpillSense — AI Satellite SAR Oil Spill Detection & AIS Maritime Forensics</title>
+  <meta name="description" content="AI-powered command-center detecting ocean oil spills from Synthetic Aperture Radar (SAR) satellite imagery and identifying responsible vessels via AIS tracking data.">
+  
+  <!-- Google Fonts: Space Grotesk, Inter, JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+  
+  <!-- Leaflet CSS for Dark Interactive Satellite Maps -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+
+  <!-- Main Design System Stylesheet -->
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+  <!-- =====================================================================
+       VIEW CONTAINER (Single-Page Application Shell)
+       ===================================================================== -->
+  <div class="view-container">
+
+    <!-- ===================================================================
+         SCREEN 1: SPLASH SCREEN
+         =================================================================== -->
+    <section id="screen-splash" class="screen-view active-screen">
+      <div class="splash-radar-container">
+        <!-- Animated Radar Sweep -->
+        <div class="radar-sweep-disc"></div>
+        <div class="radar-ring radar-ring-1"></div>
+        <div class="radar-ring radar-ring-2"></div>
+        <div class="radar-ring radar-ring-3"></div>
+        <div class="radar-sweep-beam"></div>
+
+        <!-- Radar-Ping Droplet Logo -->
+        <div class="splash-logo-emblem">
+          <svg width="100" height="100" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <!-- Outer Radar Ring -->
+            <circle cx="50" cy="50" r="46" stroke="#00D4FF" stroke-width="2" stroke-dasharray="4 6" opacity="0.6"/>
+            <circle cx="50" cy="50" r="36" stroke="#00D4FF" stroke-width="1.5" opacity="0.4"/>
+            <!-- Ocean-protection Shield & Wave -->
+            <path d="M50 13L79 24V48C79 67 67 81 50 88C33 81 21 67 21 48V24L50 13Z"
+                  fill="url(#dropletGradient)" stroke="#00D4FF" stroke-width="2"/>
+            <path d="M28 58C34 52 40 52 46 58C52 64 58 64 72 53M28 67C34 61 40 61 46 67C52 73 58 73 72 62"
+                  stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" fill="none"/>
+            <defs>
+              <linearGradient id="dropletGradient" x1="50" y1="18" x2="50" y2="86" gradientUnits="userSpaceOnUse">
+                <stop offset="0%" stop-color="#00D4FF" stop-opacity="0.85"/>
+                <stop offset="60%" stop-color="#071E3D" stop-opacity="0.95"/>
+                <stop offset="100%" stop-color="#050B14"/>
+              </linearGradient>
+            </defs>
+          </svg>
+        </div>
+      </div>
+
+      <h1 class="splash-brand-title">Spill<span>Sense</span></h1>
+      <p class="splash-brand-tagline">AI Ocean SAR & AIS Maritime Forensics</p>
+
+      <div class="splash-loader-box">
+        <div class="splash-progress-track">
+          <div class="splash-progress-fill" id="splash-progress-bar"></div>
+        </div>
+        <div class="splash-telemetry-text">
+          <span id="splash-status-text">Syncing Sentinel-1 SAR telemetry...</span>
+          <span class="mono" id="splash-percent-text">18%</span>
+        </div>
+      </div>
+
+      <button class="splash-skip-btn" id="btn-skip-splash">Skip to Briefing →</button>
+    </section>
+
+
+    <!-- ===================================================================
+         SCREEN 2: LANDING PAGE
+         =================================================================== -->
+    <section id="screen-landing" class="screen-view">
+      <!-- Sticky Frosted Glass Navbar -->
+      <nav class="landing-nav">
+        <div class="nav-brand">
+          <svg class="brand-icon-sm" viewBox="0 0 100 100" fill="none">
+            <path d="M50 13L79 24V48C79 67 67 81 50 88C33 81 21 67 21 48V24L50 13Z" fill="#00D4FF" opacity="0.9"/>
+            <path d="M28 58C34 52 40 52 46 58C52 64 58 64 72 53M28 67C34 61 40 61 46 67C52 73 58 73 72 62" stroke="#050B14" stroke-width="4" stroke-linecap="round" fill="none"/>
+          </svg>
+          <span class="brand-name">Spill<span>Sense</span></span>
+        </div>
+
+        <div class="nav-links">
+          <a href="#how-it-works" class="nav-link">How it Works</a>
+          <a href="#matrix" class="nav-link">Forensic Advantage</a>
+          <button type="button" class="nav-link feedback-trigger" id="nav-feedback-btn">Feedback</button>
+        </div>
+
+        <div class="nav-actions">
+          <button class="btn-primary" id="landing-login-btn">Agency Sign In</button>
+        </div>
+      </nav>
+
+      <!-- Hero Section -->
+      <header class="landing-hero">
+        <div class="hero-pill-badge">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg>
+          <span>SYNTHETIC APERTURE RADAR (SAR) + GLOBAL AIS CORRELATION</span>
+        </div>
+
+        <h1 class="hero-headline">
+          Detect the spill. Identify the ship.<br>
+          Act in minutes, not weeks.
+        </h1>
+
+        <p class="hero-subheadline">
+          SpillSense autonomously intercepts orbital Synthetic Aperture Radar (SAR) backscatter, isolates petroleum slicks through heavy clouds and darkness, and cross-correlates hydrodynamic drift models against global AIS ship tracking to hold marine polluters accountable.
+        </p>
+
+        <div class="hero-ctas">
+          <button class="btn-secondary btn-hero-secondary" id="hero-how-cta">
+            <span>How it Works</span>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 13l5 5 5-5M7 6l5 5 5-5"/></svg>
+          </button>
+        </div>
+
+        <!-- Animated Stats Bar -->
+        <div class="landing-stats-bar">
+          <div class="stat-item">
+            <span class="stat-number mono">28.4M</span>
+            <span class="stat-label">km² Monitored Daily</span>
+            <span class="stat-subtext">Sentinel-1, ICEYE, RADARSAT</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-number mono">98.6%</span>
+            <span class="stat-label">SAR Classification Accuracy</span>
+            <span class="stat-subtext">Polarimetric VV/VH Deep Learning</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-number mono">&lt; 4.2m</span>
+            <span class="stat-label">Time-to-Alert Latency</span>
+            <span class="stat-subtext">From orbital ingest to coast guard ping</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-number mono">842</span>
+            <span class="stat-label">Violations Documented</span>
+            <span class="stat-subtext">Court-admissible forensic dossiers</span>
+          </div>
+        </div>
+      </header>
+
+      <!-- 4-Step Interactive Timeline Section -->
+      <section id="how-it-works" class="landing-section">
+        <div class="section-header">
+          <div class="section-tag">AUTOMATED FORENSIC PIPELINE</div>
+          <h2 class="section-title">How SpillSense Operates</h2>
+          <p class="section-desc">From orbital microwave backscatter to legal prosecution in four automated phases.</p>
+        </div>
+
+        <div class="timeline-grid">
+          <!-- Step 1 -->
+          <div class="timeline-card">
+            <span class="timeline-step-badge">STEP 01</span>
+            <h3 class="timeline-card-title">Satellite SAR Ingestion</h3>
+            <p class="timeline-card-desc">Active microwave pulses penetrate 100% of cloud cover, dense monsoon storms, and nighttime darkness to scan ocean capillary roughness at 10m spatial resolution.</p>
+            <span class="timeline-metric-chip">ALL-WEATHER ORBITAL SCAN</span>
+          </div>
+
+          <!-- Step 2 -->
+          <div class="timeline-card">
+            <span class="timeline-step-badge">STEP 02</span>
+            <h3 class="timeline-card-title">AI Slick Segmentation</h3>
+            <p class="timeline-card-desc">Multi-scale neural network differentiates hydrocarbon damping from natural lookalikes (biogenic films, algal blooms, low-wind sea calm) using dual-pol VV/VH ratios.</p>
+            <span class="timeline-metric-chip">0.02% FALSE POSITIVE RATE</span>
+          </div>
+
+          <!-- Step 3 -->
+          <div class="timeline-card">
+            <span class="timeline-step-badge">STEP 03</span>
+            <h3 class="timeline-card-title">AIS Hydrodynamic Drift</h3>
+            <p class="timeline-card-desc">Lagrangian reverse-particle physics backtrack ocean currents and windage to calculate the exact coordinate and timestamp of discharge, intersecting historical AIS vessel tracks.</p>
+            <span class="timeline-metric-chip">LAGRANGIAN BACK-PROPAGATION</span>
+          </div>
+
+          <!-- Step 4 -->
+          <div class="timeline-card">
+            <span class="timeline-step-badge">STEP 04</span>
+            <h3 class="timeline-card-title">Evidentiary Dossier</h3>
+            <p class="timeline-card-desc">Automated compilation of court-admissible legal packets including IMO registry, transponder blackout gaps, draft loss telemetry, and cryptographically hashed evidence.</p>
+            <span class="timeline-metric-chip">MARPOL ANNEX I ADMISSIBLE</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Comparison Section -->
+      <section id="matrix" class="landing-section">
+        <div class="section-header">
+          <div class="section-tag">SURVEILLANCE BENCHMARK</div>
+          <h2 class="section-title">Spill Sense vs. Traditional Monitoring</h2>
+          <p class="section-desc">Why coast guards and maritime environmental agencies are retiring optical patrols.</p>
+        </div>
+
+        <div class="comparison-table-wrapper">
+          <table class="comparison-table">
+            <thead>
+              <tr>
+                <th>Surveillance Capability</th>
+                <th class="highlight-col">Spill Sense AI Platform</th>
+                <th>Traditional Aircraft & Coast Patrols</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Time-to-Detection</strong></td>
+                <td class="highlight-col"><span class="badge-tag-positive">✓ Under 5 minutes</span></td>
+                <td><span class="badge-tag-negative">✕ 3 to 14 days</span></td>
+              </tr>
+              <tr>
+                <td><strong>Night & Cloud Penetration</strong></td>
+                <td class="highlight-col"><span class="badge-tag-positive">✓ 100% (SAR C/X-Band)</span></td>
+                <td><span class="badge-tag-negative">✕ 0% (Visual/Optical only)</span></td>
+              </tr>
+              <tr>
+                <td><strong>Dark Vessel Attribution</strong></td>
+                <td class="highlight-col"><span class="badge-tag-positive">✓ Automated Drift & AIS Correlation (94.8%)</span></td>
+                <td><span class="badge-tag-negative">✕ Rare (&lt; 12% culprit identified)</span></td>
+              </tr>
+              <tr>
+                <td><strong>Monitoring Cost per 10,000 km²</strong></td>
+                <td class="highlight-col"><span class="badge-tag-positive">✓ $18 USD (Orbital Ingest)</span></td>
+                <td><span class="badge-tag-negative">✕ $8,400 USD (Flight hours & crew)</span></td>
+              </tr>
+              <tr>
+                <td><strong>Prosecutorial Chain of Custody</strong></td>
+                <td class="highlight-col"><span class="badge-tag-positive">✓ SHA-256 Hashed Evidence Dossier</span></td>
+                <td><span class="badge-tag-negative">✕ Unstructured Pilot Photos</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Landing Footer -->
+      <footer class="landing-footer">
+        <div class="footer-content">
+          <div>
+            <strong>Spill Sense</strong> &copy; 2026 Maritime Environmental Defense Operations.
+          </div>
+          <div class="footer-telemetry">
+            <span>COAST GUARD SECTOR 4</span>
+            <span>SENTINEL-1A ORBIT 148</span>
+            <span>LAT/LONG: 02°22'N, 101°54'E</span>
+          </div>
+        </div>
+      </footer>
+    </section>
+
+
+    <!-- ===================================================================
+         SCREEN 3: LOGIN PAGE (Split-Screen with SAR Imagery)
+         =================================================================== -->
+    <section id="screen-login" class="screen-view">
+      <!-- Left Glass Login Card -->
+      <div class="login-left-pane">
+        <div class="login-header-brand">
+          <svg width="32" height="32" viewBox="0 0 100 100" fill="none">
+            <path d="M50 13L79 24V48C79 67 67 81 50 88C33 81 21 67 21 48V24L50 13Z" fill="#00D4FF"/>
+            <path d="M28 58C34 52 40 52 46 58C52 64 58 64 72 53M28 67C34 61 40 61 46 67C52 73 58 73 72 62" stroke="#050B14" stroke-width="4" stroke-linecap="round" fill="none"/>
+          </svg>
+          <span class="brand-name">Spill<span>Sense</span></span>
+        </div>
+
+        <div class="login-card">
+          <h2 class="login-title">Command Portal</h2>
+          <p class="login-subtitle">Authenticate with Coast Guard or Marine Agency credentials.</p>
+
+          <form id="login-form" onsubmit="return false;">
+            <div class="login-field-group">
+              <label class="field-label" for="login-email">Agency ID / Email</label>
+              <input type="email" id="login-email" class="field-input mono" value="e.vance@uscg.maritime.gov" required>
+            </div>
+
+            <div class="login-field-group">
+              <label class="field-label" for="login-pass">Cryptographic Token / Password</label>
+              <input type="password" id="login-pass" class="field-input mono" value="••••••••••••••••" required>
+            </div>
+
+            <div class="demo-account-box">
+              <button type="button" class="btn-demo-login" id="btn-demo-login">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4M10 17l5-5-5-5M15 12H3"/></svg>
+                <span>Login with Demo Account</span>
+              </button>
+              <div class="demo-helper-text">No sign-up needed — explore the full prototype instantly</div>
+            </div>
+          </form>
+        </div>
+
+        <div class="login-footer-info">
+          <span>CLASSIFIED / LAW ENFORCEMENT SENSITIVE</span>
+          <span>BUILD v4.8.2-SAR</span>
+        </div>
+      </div>
+
+      <!-- Right Pane: Real Satellite Ocean SAR Imagery with Targeting HUD -->
+      <div class="login-right-pane">
+        <img src="assets/images/sar_satellite_ocean.jpg" alt="Satellite SAR ocean view" class="login-sar-image">
+        
+        <div class="login-hud-overlay">
+          <div class="hud-top-telemetry mono">
+            <span>SENSOR: SENTINEL-1A C-BAND IW VV+VH</span>
+            <span style="margin: 0 12px;">|</span>
+            <span>ORBIT: 45°112'N 157°8'E</span>
+            <span style="margin: 0 12px;">|</span>
+            <span style="color: var(--green-safe);">TELEMETRY LOCKED</span>
+          </div>
+
+          <!-- HUD Targeting Reticle -->
+          <div class="hud-target-reticle">
+            <svg width="40" height="40" viewBox="0 0 40 40" fill="none" stroke="#FF4438" stroke-width="1.5">
+              <line x1="20" y1="0" x2="20" y2="40"/>
+              <line x1="0" y1="20" x2="40" y2="20"/>
+            </svg>
+            <div class="hud-reticle-label mono">SAR ANOMALY DETECTED: 45.2 km²</div>
+          </div>
+
+          <div style="font-family: var(--font-mono); font-size: 11px; color: var(--text-muted);">
+            GEO-COORDINATES: 02°22'52"N, 101°54'45"E | RADAR FREQUENCY: 5.405 GHz
+          </div>
+        </div>
+      </div>
+    </section>
+
+
+    <!-- ===================================================================
+         APP SHELL: WRAPS SCREENS 4 (DASHBOARD), 5 (INVESTIGATION),
+         6 (VESSEL TRACKING), 7 (ANALYTICS)
+         =================================================================== -->
+    <div id="app-shell-wrapper" class="app-shell" style="display: none;">
+      
+      <!-- Left Icon Sidebar -->
+      <aside class="app-sidebar">
+        <div>
+          <div class="sidebar-brand-icon" id="sidebar-logo-btn" title="Return to Dashboard">
+            <svg width="34" height="34" viewBox="0 0 100 100" fill="none">
+              <path d="M50 13L79 24V48C79 67 67 81 50 88C33 81 21 67 21 48V24L50 13Z" fill="#00D4FF"/>
+              <path d="M28 58C34 52 40 52 46 58C52 64 58 64 72 53M28 67C34 61 40 61 46 67C52 73 58 73 72 62" stroke="#050B14" stroke-width="4" stroke-linecap="round" fill="none"/>
+            </svg>
+          </div>
+        </div>
+
+        <nav class="sidebar-nav-items">
+          <!-- 1. Dashboard / Live Map -->
+          <button class="sidebar-btn active" data-app-view="screen-dashboard" id="side-btn-dashboard" title="Live Tactical Map">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/></svg>
+          </button>
+
+          <!-- 2. Investigation -->
+          <button class="sidebar-btn" data-app-view="screen-investigation" id="side-btn-investigation" title="Spill Investigation & Attribution">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+          </button>
+
+          <!-- 3. Vessel Tracking -->
+          <button class="sidebar-btn" data-app-view="screen-vessels" id="side-btn-vessels" title="AIS Vessel Tracking Registry">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 20a2.4 2.4 0 0 0 2 1 2.4 2.4 0 0 0 2-1 2.4 2.4 0 0 1 2-1 2.4 2.4 0 0 1 2 1 2.4 2.4 0 0 0 2 1 2.4 2.4 0 0 0 2-1 2.4 2.4 0 0 1 2-1 2.4 2.4 0 0 1 2 1 2.4 2.4 0 0 0 2 1 2.4 2.4 0 0 0 2-1"/><path d="M4 18L3 12h18l-1 6"/><path d="M12 12V4l4 2-4 2"/></svg>
+          </button>
+
+          <!-- 4. Alerts -->
+          <button class="sidebar-btn" id="side-btn-alerts" title="Critical Slicks Alert Queue">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+            <span class="sidebar-badge">3</span>
+          </button>
+
+          <!-- 5. Analytics -->
+          <button class="sidebar-btn" data-app-view="screen-analytics" id="side-btn-analytics" title="Spills Analytics & Trends">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+          </button>
+
+          <!-- 6. Settings -->
+          <!-- <button class="sidebar-btn" id="side-btn-settings" title="Sensor Calibration & Settings">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          </button> -->
+        </nav>
+
+        <div class="sidebar-bottom-actions">
+          <div class="user-avatar-btn" title="Cmdr. Elena Vance (USCG Sector 4)">
+            EV
+          </div>
+        </div>
+      </aside>
+
+      <!-- App Main Viewport -->
+      <div class="app-main-viewport">
+        
+        <!-- Top Command Bar -->
+        <header class="app-topbar">
+          <div class="topbar-left">
+            <!-- Region Selector -->
+            <select id="region-selector" class="topbar-region-select">
+              <option value="malacca" selected>Strait of Malacca (TSS Corridor)</option>
+              <option value="persian_gulf">Persian Gulf (Strait of Hormuz)</option>
+              <option value="north_sea">North Sea (Dogger Bank Sector)</option>
+              <option value="gulf_mexico">Gulf of Mexico (Mississippi Canyon)</option>
+            </select>
+
+            <!-- Live SAR Status Badge -->
+            <div class="sar-live-indicator">
+              <span class="pulse-cyan-dot"></span>
+              <span>SENTINEL-1A SAR • PASS IN 00:38:12</span>
+            </div>
+          </div>
+
+          <div class="topbar-right">
+            <!-- Live UTC Clock -->
+            <div class="topbar-clock" id="live-utc-clock">
+              2026-09-16 15:08:22 UTC
+            </div>
+
+            <!-- Quick Spill Alert bell + unread count -->
+            <div class="alert-bell-wrap">
+              <button class="alert-bell-btn" id="alert-bell-btn" title="Quick Spill Alerts" aria-label="Quick Spill Alerts" aria-haspopup="dialog" aria-expanded="false">
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+                <span class="alert-bell-count" id="alert-bell-count" hidden>0</span>
+              </button>
+            </div>
+
+            <button class="emergency-alert-btn" id="emergency-alerts-btn" type="button" aria-haspopup="dialog">
+              <span class="emergency-alert-pulse"></span>
+              <span>EMERGENCY ALERTS</span>
+            </button>
+
+            <button class="btn-secondary" id="btn-topbar-logout" style="padding: 6px 12px; font-size: 11px;">
+              Logout
+            </button>
+          </div>
+        </header>
+
+        <!-- =============================================================
+             QUICK SPILL ALERT PANEL (slide-in, does not alter layout)
+             ============================================================= -->
+        <aside class="alert-panel" id="alert-panel" role="dialog" aria-label="Quick Spill Alerts" aria-hidden="true">
+          <div class="alert-panel-header">
+            <div class="alert-panel-title-group">
+              <span class="alert-panel-title">Quick Spill Alerts</span>
+              <span class="alert-panel-sub mono" id="alert-panel-count">0 active</span>
+            </div>
+            <button class="alert-panel-close" id="alert-panel-close" aria-label="Close alerts panel">&times;</button>
+          </div>
+
+          <div class="alert-panel-toolbar">
+            <button class="btn-secondary alert-toolbar-btn" id="btn-alert-demo" type="button">Load Demo Alerts</button>
+            <button class="btn-secondary alert-toolbar-btn" id="btn-alert-ack-all" type="button">Acknowledge All</button>
+            <button class="btn-secondary alert-toolbar-btn" id="btn-alert-clear" type="button">Clear</button>
+          </div>
+
+          <div class="alert-list" id="alert-list">
+            <div class="alert-empty" id="alert-empty">
+              No alerts yet. Alerts raise automatically when a slick breaches &ge;75% confidence, &ge;2 km&sup2; area, or comes within 20 km of a sensitive area — or press <strong>Load Demo Alerts</strong>.
+            </div>
+          </div>
+
+          <div class="alert-panel-footer">
+            <div class="alert-disclaimer" id="alert-disclaimer">Investigation support only — requires authorised field verification.</div>
+          </div>
+        </aside>
+
+        <div class="emergency-modal" id="emergency-modal" aria-hidden="true">
+          <div class="emergency-dialog" role="dialog" aria-modal="true" aria-labelledby="emergency-title">
+            <div class="emergency-dialog-header">
+              <div><span class="emergency-mode-label">OPERATOR REVIEW · DEMO TRANSMISSION</span><h2 id="emergency-title">Emergency Alerts</h2></div>
+              <button class="alert-panel-close" id="emergency-close" type="button" aria-label="Close emergency alerts">&times;</button>
+            </div>
+            <div class="emergency-dialog-body">
+              <div class="emergency-section-title">Active alerts</div>
+              <div id="emergency-active-list" class="emergency-active-list"></div>
+              <div class="emergency-section-title">Alert History</div>
+              <div id="emergency-history-list" class="emergency-history-list"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="emergency-confirm-modal" id="emergency-confirm-modal" aria-hidden="true">
+          <div class="emergency-dialog emergency-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-emergency-title">
+            <div class="emergency-dialog-header"><div><span class="emergency-mode-label">CONFIRM BEFORE TRANSMISSION</span><h2 id="confirm-emergency-title">Send Alert to Authorities</h2></div><button class="alert-panel-close" id="emergency-confirm-close" type="button" aria-label="Close confirmation">&times;</button></div>
+            <div id="emergency-confirm-body" class="emergency-dialog-body"></div>
+            <div class="emergency-confirm-footer"><span id="emergency-confirm-status" class="emergency-confirm-status"></span><button class="btn-secondary" id="emergency-confirm-cancel" type="button">Cancel</button><button class="btn-primary emergency-official-btn" id="emergency-send-sms" type="button">SEND VIA SMS</button></div>
+          </div>
+        </div>
+
+        <!-- Toast stack (fixed overlay, bottom-right) -->
+        <div class="alert-toast-stack" id="alert-toast-stack" aria-live="polite" aria-atomic="false"></div>
+
+        <!-- Dynamic Screen Content Area -->
+        <div style="position: relative; flex: 1; overflow: hidden; display: flex;">
+
+          <!-- =============================================================
+               SCREEN 4: MAIN DASHBOARD (Full-Screen Interactive Map)
+               ============================================================= -->
+          <section id="screen-dashboard" class="screen-view active-screen">
+            <div class="dashboard-map-container">
+              <!-- Leaflet Map Mount Point -->
+              <div id="leaflet-map"></div>
+
+              <!-- Floating "Priority Zone" Card (Top-Left) -->
+              <div class="priority-zone-card" id="priority-zone-card">
+                <div class="priority-badge-row">
+                  <div class="priority-pill">
+                    <span class="pulse-cyan-dot" style="background: var(--red-alert); box-shadow: 0 0 6px var(--red-alert);"></span>
+                    <span>PRIORITY ZERO INCIDENT</span>
+                  </div>
+                  <span class="mono" style="font-size: 11px; color: var(--red-alert);">CRITICAL</span>
+                </div>
+
+                <div id="priority-incident-id" class="priority-incident-id">#SG-8842: Malacca TSS</div>
+                <div id="priority-location-txt" class="priority-location-txt">Offshore Melaka • Traffic Separation Scheme</div>
+
+                <div class="priority-metrics-row">
+                  <div>
+                    <div class="priority-mini-lbl">SLICK SIZE</div>
+                    <div class="priority-mini-val" style="color: var(--red-alert);">45.2 km²</div>
+                  </div>
+                  <div>
+                    <div class="priority-mini-lbl">EST. VOLUME</div>
+                    <div class="priority-mini-val">18,400 bbls</div>
+                  </div>
+                  <div>
+                    <div class="priority-mini-lbl">SAR CONFIDENCE</div>
+                    <div class="priority-mini-val" style="color: var(--cyan-primary);">96.8%</div>
+                  </div>
+                  <div>
+                    <div class="priority-mini-lbl">PRIMARY SUSPECT</div>
+                    <div class="priority-mini-val" style="color: #FFF;">MT Ocean Vanguard</div>
+                  </div>
+                </div>
+
+                <!-- New Analysis Controls Section -->
+                <div class="analysis-actions">
+                  <button class="btn-primary btn-case-review" id="btn-case-review" type="button">
+                    <span>Case Review</span>
+                  </button>
+                  <button class="btn-secondary btn-reset-view" id="btn-reset-view" type="button">
+                    <span>Reset View</span>
+                  </button>
+                </div>
+                <div class="analysis-support-note">Investigation support, not final proof</div>
+              </div>
+
+              <!-- Floating Map Layer Toggles (Top-Right) -->
+              <div class="map-layer-controls">
+                <button class="layer-toggle-btn active" id="layer-toggle-slicks">SAR Slicks (3)</button>
+                <button class="layer-toggle-btn active" id="layer-toggle-ais">AIS Tracks (7)</button>
+              </div>
+
+
+              <!-- Slide-in Detail Drawer (Right Side) -->
+              <div class="map-detail-drawer" id="map-detail-drawer">
+                <div class="drawer-header">
+                  <div class="drawer-title-group">
+                    <span class="drawer-id-badge" id="drawer-spill-id">#SG-8842</span>
+                    <h3 class="drawer-title" id="drawer-spill-title">Malacca Strait TSS</h3>
+                  </div>
+                  <button class="drawer-close-btn" id="btn-close-drawer">&times;</button>
+                </div>
+
+                <div class="drawer-body">
+                  <!-- SAR Thumbnail -->
+                  <div class="drawer-sar-thumbnail-box">
+                    <img src="assets/images/sar_slick_detail.jpg" alt="SAR Slick Inspection" class="drawer-sar-img" id="drawer-sar-img">
+                    <span class="drawer-sar-tag mono" id="drawer-sensor-tag">SENTINEL-1A C-BAND</span>
+                  </div>
+
+                  <!-- Spec Grid -->
+                  <div class="drawer-spec-grid">
+                    <div class="drawer-spec-card">
+                      <div class="drawer-spec-lbl">Slick Surface Area</div>
+                      <div class="drawer-spec-val" id="drawer-spec-area">45.2 km²</div>
+                    </div>
+                    <div class="drawer-spec-card">
+                      <div class="drawer-spec-lbl">Est. Discharge</div>
+                      <div class="drawer-spec-val" id="drawer-spec-volume">18,400 bbls</div>
+                    </div>
+                    <div class="drawer-spec-card">
+                      <div class="drawer-spec-lbl">Detection Confidence</div>
+                      <div class="drawer-spec-val" style="color: var(--cyan-primary);" id="drawer-spec-conf">96.8%</div>
+                    </div>
+                    <div class="drawer-spec-card">
+                      <div class="drawer-spec-lbl">Slick Substance</div>
+                      <div class="drawer-spec-val" style="font-size: 11px;" id="drawer-spec-type">Heavy Crude Oil</div>
+                    </div>
+                  </div>
+
+                  <!-- Suspect preview -->
+                  <div class="drawer-suspect-preview">
+                    <div class="drawer-suspect-title">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                      <span>PRIMARY ATTRIBUTED VESSEL</span>
+                    </div>
+                    <div class="drawer-suspect-name" id="drawer-suspect-name">MT Ocean Vanguard (94.8% Match)</div>
+                    <div class="mono" style="font-size: 11px; color: var(--text-muted); margin-top: 4px;" id="drawer-suspect-reason">
+                      AIS transponder was disabled for 3.8 hrs directly across slick origin coordinates.
+                    </div>
+                  </div>
+
+                  <div style="font-size: 12px; color: var(--text-secondary); line-height: 1.5;">
+                    Hydrodynamic drift model indicates discharge occurred 6.2 hours prior to orbital pass. Reverse trajectory coincides with Liberia-flagged tanker track.
+                  </div>
+
+                  <section class="spill-analysis-card" aria-labelledby="spill-analysis-title">
+                    <div class="spill-analysis-header">
+                      <div>
+                        <div class="spill-analysis-kicker">GEOSPATIAL REVIEW</div>
+                        <h4 id="spill-analysis-title">Spill Analysis</h4>
+                      </div>
+                      <span class="spill-confidence-badge" id="spill-analysis-confidence">—</span>
+                    </div>
+                    <div class="spill-analysis-status" id="spill-analysis-status">Select a spill polygon to calculate geometry.</div>
+                    <table class="spill-analysis-table" aria-label="Spill geometry metrics">
+                      <tbody id="spill-analysis-metrics"></tbody>
+                    </table>
+                  </section>
+                </div>
+
+                <div class="drawer-actions">
+                  <button class="btn-investigate-full" id="btn-drawer-investigate">
+                    <span>Investigate Attribution & Drift</span>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+                  </button>
+                </div>
+              </div>
+
+              <!-- Bottom Timeline Scrubber for Replaying Satellite Passes -->
+              
+            </div>
+          </section>
+
+
+          <!-- =============================================================
+               SCREEN 5: SPILL INVESTIGATION & VESSEL ATTRIBUTION PAGE
+               ============================================================= -->
+          <section id="screen-investigation" class="screen-view">
+            <!-- Header -->
+            <div class="investigation-header">
+              <div class="investigation-title-left">
+                <button class="btn-back-link" id="btn-back-to-dashboard">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+                  <span>Live Map</span>
+                </button>
+                <div>
+                  <h2 class="investigation-code-title">Case #SG-8842: Hydrodynamic Drift & Vessel Attribution</h2>
+                  <div class="mono" style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;">
+                    SECTOR 4 TRAFFIC SEPARATION SCHEME • DISCHARGE ORIGIN: 02°26'42"N, 101°51'18"E
+                  </div>
+                </div>
+              </div>
+
+            </div>
+
+            <!-- 3-Column Forensic Layout -->
+            <div class="investigation-layout">
+              
+              <!-- Column 1: Forensic Overview Card -->
+              <div class="forensic-overview-col">
+                <div class="drift-controls-card">
+                  <div class="forensic-card-header">
+                    <span>Oil Drift Analysis</span>
+                    <span class="mono drift-control-status" id="drift-control-status">READY</span>
+                  </div>
+                  <div class="drift-control-grid">
+                    <label>Spill latitude<input id="drift-spill-lat" type="number" step="0.000001"></label>
+                    <label>Spill longitude<input id="drift-spill-lon" type="number" step="0.000001"></label>
+                    <label>SAR acquisition UTC<input id="drift-sar-time" type="datetime-local"></label>
+                    <label>Forecast hours<select id="drift-hours"><option value="6">6 h</option><option value="12" selected>12 h</option><option value="24">24 h</option><option value="48">48 h</option></select></label>
+                    <label>Current speed (m/s)<input id="drift-current-speed" type="number" min="0" step="0.01" value="0.4"></label>
+                    <label>Current direction (°)<input id="drift-current-direction" type="number" min="0" max="360" step="1" value="45"></label>
+                    <label>Wind speed (m/s)<input id="drift-wind-speed" type="number" min="0" step="0.01" value="0"></label>
+                    <label>Wind direction (°)<input id="drift-wind-direction" type="number" min="0" max="360" step="1" value="310"></label>
+                    <label>Origin uncertainty (km)<input id="drift-uncertainty" type="number" min="0.1" step="0.1" value="5"></label>
+                  </div>
+                  <div class="drift-control-actions">
+                    <button class="btn-secondary" id="btn-demo-ocean-conditions" type="button">Use Demo Ocean Conditions</button>
+                    <button class="btn-primary" id="btn-predict-forward-drift" type="button">Predict Forward Drift</button>
+                  </div>
+                  <div class="drift-result-summary" id="drift-result-summary">Enter conditions, then run a forecast.</div>
+                  <div class="drift-hourly-list" id="drift-hourly-list"></div>
+                </div>
+                <div class="forensic-card">
+                  <div class="forensic-card-header">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                    <span>SAR Polarimetric Forensics</span>
+                  </div>
+
+                  <div class="forensic-image-wrap">
+                    <img src="assets/images/sar_slick_detail.jpg" alt="SAR Forensic Inspection">
+                  </div>
+
+                  <div class="forensic-metric-list">
+                    <div class="forensic-metric-row">
+                      <span class="forensic-lbl">SAR Polarimetric Ratio</span>
+                      <span class="forensic-val" style="color: var(--cyan-primary);">-7.4 dB VV/VH</span>
+                    </div>
+                    <div class="forensic-metric-row">
+                      <span class="forensic-lbl">Mean Core Thickness</span>
+                      <span class="forensic-val">1.42 mm (3.8mm max)</span>
+                    </div>
+                    <div class="forensic-metric-row">
+                      <span class="forensic-lbl">Hydrodynamic Drift Speed</span>
+                      <span class="forensic-val">2.1 kt @ 138° (SE)</span>
+                    </div>
+                    <div class="forensic-metric-row">
+                      <span class="forensic-lbl">Surface Wind Vector</span>
+                      <span class="forensic-val">14.2 kt NW (310°)</span>
+                    </div>
+                    <div class="forensic-metric-row">
+                      <span class="forensic-lbl">Sea Surface Temp</span>
+                      <span class="forensic-val">29.4 °C</span>
+                    </div>
+                    <div class="forensic-metric-row">
+                      <span class="forensic-lbl">Distance to Coral Reef</span>
+                      <span class="forensic-val" style="color: var(--amber-warning);">8.4 nm (High Risk)</span>
+                    </div>
+                  </div>
+                </div>
+
+              </div>
+
+              <!-- Column 2: Interactive Evidence Map (Drift Simulation & Overlaid AIS) -->
+              <div class="evidence-map-col">
+                <div class="evidence-map-box">
+                  <div class="evidence-map-hud-bar">
+                    <div class="drift-sim-badge">
+                      <span class="pulse-cyan-dot"></span>
+                      <span>LAGRANGIAN REVERSE-DRIFT SIMULATION ENGINE</span>
+                    </div>
+                    <div class="mono" style="font-size: 11px; color: var(--text-secondary);">
+                      BACK-PROPAGATION: 0h to -12h
+                    </div>
+                  </div>
+
+                  <!-- Canvas for high performance drift simulation & vessel track intersection -->
+                  <div id="drift-sim-container" style="flex: 1; position: relative; width: 100%; height: 100%;">
+                    <canvas id="drift-canvas" style="width: 100%; height: 100%; display: block;"></canvas>
+                    
+                    <!-- Overlaid Legend HUD -->
+                    <div style="position: absolute; top: 16px; left: 16px; background: rgba(5, 11, 20, 0.88); backdrop-filter: blur(8px); border: 1px solid var(--cyan-border); padding: 10px 14px; border-radius: var(--radius-sm); font-size: 11px; font-family: var(--font-mono);">
+                      <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
+                        <span style="width: 12px; height: 12px; background: var(--red-alert); border-radius: 2px;"></span>
+                        <span>Current Slick Position (Sentinel-1A SAR)</span>
+                      </div>
+                      <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
+                        <span style="width: 12px; height: 3px; background: #FFB020; border-top: 2px dashed #FFB020;"></span>
+                        <span>Lagrangian Back-Drift Trajectory</span>
+                      </div>
+                      <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
+                        <span style="width: 12px; height: 3px; background: var(--cyan-primary);"></span>
+                        <span>MT Ocean Vanguard AIS Track</span>
+                      </div>
+                      <div style="display: flex; align-items: center; gap: 8px;">
+                        <span style="width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--red-alert);"></span>
+                        <span>Discharge Intercept Point (03:14 UTC)</span>
+                      </div>
+                    </div>
+
+                    <!-- Replay Button Overlay -->
+                    <div style="position: absolute; top: 16px; right: 16px; display: flex; gap: 8px;">
+                      <button class="btn-secondary" id="btn-replay-drift" style="padding: 6px 12px; font-size: 11px; background: rgba(5, 11, 20, 0.85);">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                        <span>Replay Reverse Drift</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Column 3: Ranked Vessel Attribution List -->
+              <div class="attribution-col">
+                <div class="attribution-header">
+                  <h3 class="attribution-title">Vessel Attribution Ranking</h3>
+                  <span class="mono" style="font-size: 11px; color: var(--text-muted);">3 AIS CANDIDATES</span>
+                </div>
+
+                <div class="candidate-vessels-list">
+                  
+                  <!-- Candidate 1: Primary Suspect (MT Ocean Vanguard) -->
+                  <div class="vessel-candidate-card primary-suspect">
+                    <div class="vessel-candidate-top">
+                      <div>
+                        <div class="candidate-name">
+                          <span>1. MT Ocean Vanguard</span>
+                          <span style="font-size: 14px;">🇱🇷</span>
+                        </div>
+                        <div class="candidate-meta">IMO 9482154 • VLCC Crude Carrier</div>
+                      </div>
+
+                      <div class="confidence-gauge-box">
+                        <span class="confidence-pct high-match">94.8%</span>
+                        <span class="confidence-lbl">CORRELATION</span>
+                      </div>
+                    </div>
+
+                    <div class="evidence-chips-list">
+                      <div class="evidence-chip red-evidence">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                        <span>AIS silent for 3h 48m precisely at slick origin</span>
+                      </div>
+                      <div class="evidence-chip red-evidence">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                        <span>Draft loss: -1.6m (-2,400 metric tonnes displacement)</span>
+                      </div>
+                      <div class="evidence-chip red-evidence">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                        <span>Speed anomaly: slowed from 14.4kt to 6.4kt in blackout</span>
+                      </div>
+                      <div class="evidence-chip amber-evidence">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                        <span>Lagrangian reverse-drift trajectory match (r = 0.984)</span>
+                      </div>
+                      <div class="evidence-chip amber-evidence">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polygon points="12 8 8 12 12 16 16 12 12 8"/></svg>
+                        <span>Trailing wake radar damping detected on SAR swath</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Candidate 2: Nordic Titan -->
+                  <div class="vessel-candidate-card">
+                    <div class="vessel-candidate-top">
+                      <div>
+                        <div class="candidate-name">
+                          <span>2. Nordic Titan</span>
+                          <span style="font-size: 14px;">🇲🇭</span>
+                        </div>
+                        <div class="candidate-meta">IMO 9310842 • Capesize Bulk Carrier</div>
+                      </div>
+
+                      <div class="confidence-gauge-box">
+                        <span class="confidence-pct med-match">41.2%</span>
+                        <span class="confidence-lbl">LOW MATCH</span>
+                      </div>
+                    </div>
+
+                    <div class="evidence-chips-list">
+                      <div class="evidence-chip neutral-evidence">
+                        <span>Passed 4.8 nm downwind of estimated origin coordinates</span>
+                      </div>
+                      <div class="evidence-chip neutral-evidence">
+                        <span>Maintained continuous uninterrupted Class-A AIS broadcast</span>
+                      </div>
+                      <div class="evidence-chip neutral-evidence">
+                        <span>Engine telemetry and draft showed steady nominal transit</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Candidate 3: Stellar Voyager -->
+                  <div class="vessel-candidate-card">
+                    <div class="vessel-candidate-top">
+                      <div>
+                        <div class="candidate-name">
+                          <span>3. Stellar Voyager</span>
+                          <span style="font-size: 14px;">🇵🇦</span>
+                        </div>
+                        <div class="candidate-meta">IMO 9604122 • Container Carrier</div>
+                      </div>
+
+                      <div class="confidence-gauge-box">
+                        <span class="confidence-pct low-match">18.5%</span>
+                        <span class="confidence-lbl">EXCLUDED</span>
+                      </div>
+                    </div>
+
+                    <div class="evidence-chips-list">
+                      <div class="evidence-chip neutral-evidence">
+                        <span>Transited sector 8.5 hours after calculated discharge</span>
+                      </div>
+                      <div class="evidence-chip neutral-evidence">
+                        <span>High cruising speed (18.2 kt) incompatible with discharge flow</span>
+                      </div>
+                    </div>
+                  </div>
+
+                </div>
+              </div>
+
+            </div>
+          </section>
+
+
+          <!-- =============================================================
+               SCREEN 6: VESSEL TRACKING PAGE
+               ============================================================= -->
+          <section id="screen-vessels" class="screen-view">
+            <!-- Summary KPI Grid -->
+            <div class="vessels-kpi-grid">
+              <div class="vessel-kpi-card">
+                <div class="vessel-kpi-val mono">142</div>
+                <div class="vessel-kpi-lbl">Vessels Monitored in Corridor</div>
+              </div>
+              <div class="vessel-kpi-card" style="border-color: var(--red-border);">
+                <div class="vessel-kpi-val mono" style="color: var(--red-alert);">7</div>
+                <div class="vessel-kpi-lbl">Dark Vessels (AIS Anomaly Gaps)</div>
+              </div>
+              <div class="vessel-kpi-card" style="border-color: var(--amber-border);">
+                <div class="vessel-kpi-val mono" style="color: var(--amber-warning);">12</div>
+                <div class="vessel-kpi-lbl">High-Risk Tankers Flagged</div>
+              </div>
+              <div class="vessel-kpi-card">
+                <div class="vessel-kpi-val mono" style="color: var(--green-safe);">123</div>
+                <div class="vessel-kpi-lbl">Fully Compliant Class-A Streams</div>
+              </div>
+            </div>
+
+            <!-- Table Container -->
+            <div class="vessels-table-container">
+              <div class="vessels-toolbar">
+                <div class="vessels-filter-tabs">
+                  <button class="filter-tab-btn active" data-filter="all">All Vessels (7)</button>
+                  <button class="filter-tab-btn" data-filter="dark">Dark Vessels Only (3)</button>
+                  <button class="filter-tab-btn" data-filter="tankers">Crude/Chem Tankers (4)</button>
+                  <button class="filter-tab-btn" data-filter="high-risk">High Risk (3)</button>
+                </div>
+
+                <div class="topbar-search-box" style="width: 280px;">
+                  <svg class="topbar-search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                  <input type="text" id="vessel-search-input" class="topbar-search-input mono" placeholder="Filter by IMO, name, flag...">
+                </div>
+              </div>
+
+              <table class="vessels-data-table">
+                <thead>
+                  <tr>
+                    <th>Vessel Name & IMO</th>
+                    <th>Flag State</th>
+                    <th>Vessel Type</th>
+                    <th>Last AIS Ping</th>
+                    <th>Transponder Status / Dark Gap</th>
+                    <th>Speed / Course</th>
+                    <th>Risk Index</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody id="vessels-tbody">
+                  <!-- Dynamically Rendered by js/app.js -->
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+
+          <!-- =============================================================
+               SCREEN 7: ANALYTICS PAGE
+               ============================================================= -->
+          <section id="screen-analytics" class="screen-view">
+            <!-- Analytics KPI Grid -->
+            <div class="analytics-kpi-grid">
+              <div class="analytics-kpi-card">
+                <div class="analytics-kpi-val mono">1,248</div>
+                <div class="analytics-kpi-lbl">Oil Slicks Detected (Past 90 Days)</div>
+              </div>
+              <div class="analytics-kpi-card">
+                <div class="analytics-kpi-val mono" style="color: var(--red-alert);">342,800</div>
+                <div class="analytics-kpi-lbl">Est. Hydrocarbon Discharged (bbls)</div>
+              </div>
+              <div class="analytics-kpi-card">
+                <div class="analytics-kpi-val mono" style="color: var(--green-safe);">92.4%</div>
+                <div class="analytics-kpi-lbl">AIS Vessel Attribution Rate</div>
+              </div>
+              <div class="analytics-kpi-card">
+                <div class="analytics-kpi-val mono">$48.2M</div>
+                <div class="analytics-kpi-lbl">Fines & Penalties Evidence Packets</div>
+              </div>
+            </div>
+
+            <!-- Main Charts Grid -->
+            <div class="analytics-charts-grid">
+              <!-- Spills Over Time Chart -->
+              <div class="analytics-chart-panel">
+                <div class="panel-header-row">
+                  <div>
+                    <h3 class="panel-title">Spills Over Time (Severity Breakdown)</h3>
+                    <div class="mono" style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;">
+                      Monthly Synthetic Aperture Radar detection frequency
+                    </div>
+                  </div>
+                  <div style="display: flex; gap: 12px; font-size: 11px; font-family: var(--font-mono);">
+                    <span style="display: flex; align-items: center; gap: 4px; color: var(--red-alert);">
+                      <span style="width: 8px; height: 8px; background: var(--red-alert); border-radius: 2px;"></span>
+                      Catastrophic (&gt;10k bbl)
+                    </span>
+                    <span style="display: flex; align-items: center; gap: 4px; color: var(--amber-warning);">
+                      <span style="width: 8px; height: 8px; background: var(--amber-warning); border-radius: 2px;"></span>
+                      Significant (1k-10k bbl)
+                    </span>
+                    <span style="display: flex; align-items: center; gap: 4px; color: var(--cyan-primary);">
+                      <span style="width: 8px; height: 8px; background: var(--cyan-primary); border-radius: 2px;"></span>
+                      Minor Bilge (&lt;1k bbl)
+                    </span>
+                  </div>
+                </div>
+
+                <div class="chart-svg-container" id="chart-spills-time">
+                  <!-- Rendered with SVG in js/app.js -->
+                </div>
+              </div>
+
+              <!-- Regional Risk Heatmap / Distribution -->
+              <div class="analytics-chart-panel">
+                <div class="panel-header-row">
+                  <div>
+                    <h3 class="panel-title">Regional Risk Distribution</h3>
+                    <div class="mono" style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;">
+                      Discharge incident density by maritime sector
+                    </div>
+                  </div>
+                </div>
+
+                <div id="regional-distribution-bars" style="display: flex; flex-direction: column; gap: 16px; margin-top: 8px;">
+                  <!-- Dynamically rendered -->
+                </div>
+              </div>
+            </div>
+
+            <!-- Bottom Analytics Grid -->
+            <div class="analytics-bottom-grid">
+              <!-- Top Flagged Fleets -->
+              <div class="analytics-chart-panel">
+                <div class="panel-header-row">
+                  <div>
+                    <h3 class="panel-title">Top Flagged Repeat Offenders (Flag States)</h3>
+                    <div class="mono" style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;">
+                      Flags of convenience with dark vessel transponder blackouts
+                    </div>
+                  </div>
+                </div>
+
+                <div id="top-flagged-bars">
+                  <!-- Dynamically rendered -->
+                </div>
+              </div>
+
+              <!-- SAR Constellation Performance -->
+              <div class="analytics-chart-panel">
+                <div class="panel-header-row">
+                  <div>
+                    <h3 class="panel-title">Sensor Constellation Performance</h3>
+                    <div class="mono" style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;">
+                      Real-time orbital radar uptime & ingest latency
+                    </div>
+                  </div>
+                </div>
+
+                <div style="display: flex; flex-direction: column; gap: 14px;">
+                  <div class="forensic-metric-row">
+                    <span>Sentinel-1A (ESA C-Band)</span>
+                    <span class="mono" style="color: var(--green-safe);">99.4% Uptime • 2.8m latency</span>
+                  </div>
+                  <div class="forensic-metric-row">
+                    <span>RADARSAT Constellation (CSA C-Band)</span>
+                    <span class="mono" style="color: var(--green-safe);">98.8% Uptime • 4.1m latency</span>
+                  </div>
+                  <div class="forensic-metric-row">
+                    <span>ICEYE SAR Micro-Constellation (X-Band)</span>
+                    <span class="mono" style="color: var(--green-safe);">97.6% Uptime • 1.9m latency</span>
+                  </div>
+                  <div class="forensic-metric-row">
+                    <span>Global Class-A AIS (Spire / exactEarth)</span>
+                    <span class="mono" style="color: var(--cyan-primary);">100% Stream • 1.2s terrestrial sync</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+          </section>
+
+        </div>
+      </div>
+    </div>
+
+  </div> <!-- End View Container -->
+
+
+  <!-- =====================================================================
+       MODAL: USER FEEDBACK
+       ===================================================================== -->
+  <div class="modal-backdrop" id="feedback-modal">
+    <div class="modal-feedback-box">
+      <div class="modal-header">
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#00D4FF" stroke-width="2"><path d="M4 4h16v10H7l-3 3V4z"/><path d="M8 8h8M8 12h6"/></svg>
+          <span style="font-family: var(--font-heading); font-size: 16px; font-weight: 700;">Feedback</span>
+        </div>
+        <button type="button" class="modal-close-btn" data-close-feedback aria-label="Close feedback form">&times;</button>
+      </div>
+
+      <form id="feedback-form" novalidate>
+        <div class="feedback-form-grid">
+          <div class="feedback-field">
+            <label for="feedback-name">Name <span class="optional-label">(optional)</span></label>
+            <input id="feedback-name" name="name" type="text" maxlength="100" placeholder="Your name">
+          </div>
+
+          <div class="feedback-field">
+            <label for="feedback-email">Email <span class="optional-label">(optional)</span></label>
+            <input id="feedback-email" name="email" type="email" maxlength="150" placeholder="you@example.com">
+          </div>
+
+          <div class="feedback-field">
+            <label for="feedback-type">Feedback Type</label>
+            <select id="feedback-type" name="feedback_type">
+              <option value="Bug Report">Bug Report</option>
+              <option value="Feature Request">Feature Request</option>
+              <option value="User Experience">User Experience</option>
+              <option value="General Feedback" selected>General Feedback</option>
+            </select>
+          </div>
+
+          <div class="feedback-field">
+            <label>Rating</label>
+            <div class="feedback-stars" aria-label="Select rating">
+              <button type="button" class="feedback-star-btn active" data-value="1" aria-label="1 star">★</button>
+              <button type="button" class="feedback-star-btn active" data-value="2" aria-label="2 stars">★</button>
+              <button type="button" class="feedback-star-btn active" data-value="3" aria-label="3 stars">★</button>
+              <button type="button" class="feedback-star-btn" data-value="4" aria-label="4 stars">★</button>
+              <button type="button" class="feedback-star-btn" data-value="5" aria-label="5 stars">★</button>
+            </div>
+            <input type="hidden" id="feedback-rating" name="rating" value="3">
+          </div>
+
+          <div class="feedback-field full-width">
+            <label for="feedback-message">Feedback Message <span class="required-label">*</span></label>
+            <textarea id="feedback-message" name="message" rows="5" placeholder="Tell us what you think, what you need, or what isn’t working..." required></textarea>
+          </div>
+        </div>
+
+        <div class="feedback-form-actions">
+          <div id="feedback-status" class="feedback-status" role="alert" aria-live="polite"></div>
+          <div class="feedback-button-row">
+            <button type="button" class="btn-secondary" data-close-feedback>Cancel</button>
+            <button type="submit" class="btn-primary">Submit Feedback</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- =====================================================================
+       MODAL: COURT-ADMISSIBLE DOSSIER PREVIEW & EXPORT
+       ===================================================================== -->
+  <div class="modal-backdrop" id="dossier-modal">
+    <div class="modal-dossier-box">
+      <div class="modal-header">
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#00D4FF" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+          <span style="font-family: var(--font-heading); font-size: 16px; font-weight: 700;">Court-Admissible Legal Dossier Preview</span>
+        </div>
+        <button id="btn-close-modal" style="color: var(--text-muted); font-size: 20px;">&times;</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="dossier-document-preview">
+          <div class="dossier-header-seal">
+            <div>
+              <div style="font-size: 14px; font-weight: 700; color: #FFF;">SPILL SENSE MARITIME FORENSIC DOSSIER</div>
+              <div style="color: var(--text-muted); font-size: 11px;">UNITED NATIONS MARPOL ANNEX I INVESTIGATION REPORT</div>
+            </div>
+            <div style="text-align: right;">
+              <div style="color: var(--red-alert); font-weight: 700;">CLASSIFIED: LEVEL 3 FORENSIC EVIDENCE</div>
+              <div style="font-size: 11px; color: var(--text-muted);">REF: CASE-2026-SG8842-MLC</div>
+            </div>
+          </div>
+
+          <p style="margin-bottom: 12px;">
+            <strong>PRIMARY ACCUSED:</strong> MT Ocean Vanguard (IMO: 9482154, Flag: Liberia)<br>
+            <strong>INCIDENT COORDINATES:</strong> 02°22'52"N, 101°54'45"E (Strait of Malacca TSS)<br>
+            <strong>ESTIMATED SLICK EXTENT:</strong> 45.2 km² (approx. 18,400 bbls Heavy Fuel Oil)<br>
+            <strong>ORBITAL SENSOR:</strong> European Space Agency Sentinel-1A SAR (VV/VH Polarization)
+          </p>
+
+          <p style="margin-bottom: 12px; color: var(--text-secondary);">
+            <strong>CORROBORATING FORENSIC EVIDENCE SUMMARY:</strong><br>
+            1. Radar backscatter reduction anomaly of -7.4 dB characteristic of thick crude film.<br>
+            2. AIS Transponder dropout confirmed between 23:20 UTC and 03:08 UTC traversing calculated discharge centroid.<br>
+            3. Vessel draft loss of 1.6 meters recorded mid-corridor, corroborating unballasting/discharge.<br>
+            4. Lagrangian hydrodynamic particle simulation correlates vessel position with slick origin (Confidence r = 0.984).
+          </p>
+
+          <div style="border-top: 1px dashed var(--border-subtle); padding-top: 10px; font-size: 10px; color: var(--cyan-primary);">
+            DIGITAL EVIDENCE HASH (SHA-256): e4b983c27189fa3198de7e5a01bc6f4439c09d57a2c4187f1b70298e10fa31ce<br>
+            CRYPTOGRAPHIC CHAIN-OF-CUSTODY VERIFIED BY SPILL SENSE DEFENSE KERNEL
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn-secondary" id="btn-cancel-modal">Close</button>
+        <button class="btn-primary" id="btn-download-pdf">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          <span>Download Signed PDF Dossier</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Leaflet JS -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script src="https://cdn.jsdelivr.net/npm/leaflet-polylinedecorator@1.6.0/dist/leaflet.polylineDecorator.min.js"></script>
+  
+  <!-- Client config (insert your Mapbox token into js/config.js) -->
+  <script src="js/config.js"></script>
+
+   <!-- Data & Application Logic -->
+  <script src="js/data.js"></script>
+  <script src="js/alerts.js?v=emergency-alerts-20260919-3"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
