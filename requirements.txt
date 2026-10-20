@@ -1,7 +1,9 @@
 fastapi>=0.111.0
 uvicorn[standard]>=0.30.0
 pydantic>=2.7.0
-psycopg[binary]>=3.2.0
+psycopg[pool,binary]>=3.2.0
+python-dotenv>=1.0.0
+websockets>=13.0
 
 # ---------------------------------------------------------------
 # ML detection pipeline (UNet + DBSCAN)

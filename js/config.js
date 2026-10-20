@@ -13,6 +13,6 @@ window.MAPTILER_KEY = '6Ai35tAGTZpCMYQra61M';
 // through Live Server or another static-file server.
 // Empty means "use this site's origin".  This works on Vercel and avoids
 // hard-coding a localhost API address in production.
-window.SPILLGUARD_API_BASE = window.location.origin;
+window.SPILLGUARD_API_BASE = 'http://127.0.0.1:8000';
 
 // If you prefer other providers, leave MAPBOX_TOKEN empty to use the built-in CARTO dark tiles.

@@ -395,6 +395,7 @@
           <div class="topbar-left">
             <!-- Region Selector -->
             <select id="region-selector" class="topbar-region-select">
+              <option value="global">Global View</option>
               <option value="malacca" selected>Strait of Malacca (TSS Corridor)</option>
               <option value="persian_gulf">Persian Gulf (Strait of Hormuz)</option>
               <option value="north_sea">North Sea (Dogger Bank Sector)</option>
@@ -547,8 +548,41 @@
               <div class="map-layer-controls">
                 <button class="layer-toggle-btn active" id="layer-toggle-slicks">SAR Slicks (3)</button>
                 <button class="layer-toggle-btn active" id="layer-toggle-ais">AIS Tracks (7)</button>
+                <button class="layer-toggle-btn" id="btn-sentinel-search" type="button">Sentinel-1 Search</button>
+              </div>
+              <div class="ais-coverage-status" id="ais-coverage-status" role="status" aria-live="polite">
+                AIS observations loading…
               </div>
 
+              <div class="satellite-search-modal" id="satellite-search-modal" aria-hidden="true">
+                <section class="satellite-search-dialog" role="dialog" aria-modal="true" aria-labelledby="satellite-search-title">
+                  <header class="satellite-search-header">
+                    <div>
+                      <span class="satellite-search-kicker">ASF DAAC CATALOG</span>
+                      <h2 id="satellite-search-title">Sentinel-1 Imagery</h2>
+                    </div>
+                    <button class="alert-panel-close" id="btn-close-satellite-search" type="button" aria-label="Close Sentinel-1 search">&times;</button>
+                  </header>
+                  <div class="satellite-search-body">
+                    <p class="satellite-search-note">Search covers the current visible map bounds. Zoom and pan to define the area before searching.</p>
+                    <div class="satellite-search-dates">
+                      <label>From (UTC)<input id="satellite-search-start" type="date"></label>
+                      <label>To (UTC)<input id="satellite-search-end" type="date"></label>
+                      <button class="btn-primary" id="btn-run-satellite-search" type="button">Search scenes</button>
+                    </div>
+                    <div class="satellite-search-status" id="satellite-search-status" role="status" aria-live="polite"></div>
+                    <div class="satellite-search-results" id="satellite-search-results"></div>
+                    <div class="satellite-selected-scene" id="satellite-selected-scene" hidden>
+                      <div class="satellite-search-kicker">SELECTED ACQUISITION</div>
+                      <div class="satellite-selected-scene-name" id="satellite-selected-scene-name"></div>
+                      <div class="satellite-search-note">ASF scene downloads may require Earthdata authentication. The detector needs a calibrated, single-band projected GeoTIFF in metres; an unprocessed scene download is not ready for analysis.</div>
+                      <label class="satellite-file-label">Detector-ready GeoTIFF<input id="satellite-geotiff-file" type="file" accept=".tif,.tiff,image/tiff"></label>
+                      <button class="btn-primary" id="btn-run-satellite-detection" type="button" disabled>Run spill detection</button>
+                      <pre class="satellite-detection-result" id="satellite-detection-result" hidden></pre>
+                    </div>
+                  </div>
+                </section>
+              </div>
 
               <!-- Slide-in Detail Drawer (Right Side) -->
               <div class="map-detail-drawer" id="map-detail-drawer">

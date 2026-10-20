@@ -36,7 +36,7 @@ import math
 import os
 import random
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # Optional dependency detection
@@ -108,13 +108,14 @@ def has_checkpoint() -> bool:
 # ===========================================================================
 # U-NET MODEL (trainable from scratch)
 # ===========================================================================
-if HAS_TORCH:
+if torch is not None and nn is not None and F is not None:
 
     class DoubleConv(nn.Module):
         """(Conv3x3 -> BatchNorm -> ReLU) x 2"""
 
         def __init__(self, in_ch: int, out_ch: int, mid_ch: Optional[int] = None):
             super().__init__()
+            assert nn is not None
             mid_ch = mid_ch or out_ch
             self.conv = nn.Sequential(
                 nn.Conv2d(in_ch, mid_ch, kernel_size=3, padding=1, bias=False),
@@ -133,6 +134,7 @@ if HAS_TORCH:
 
         def __init__(self, in_ch: int, out_ch: int):
             super().__init__()
+            assert nn is not None
             self.mpconv = nn.Sequential(nn.MaxPool2d(2), DoubleConv(in_ch, out_ch))
 
         def forward(self, x):
@@ -143,6 +145,7 @@ if HAS_TORCH:
 
         def __init__(self, in_ch: int, out_ch: int):
             super().__init__()
+            assert nn is not None
             self.up = nn.ConvTranspose2d(in_ch, in_ch // 2, kernel_size=2, stride=2)
             self.conv = DoubleConv(in_ch, out_ch)
 
@@ -150,7 +153,9 @@ if HAS_TORCH:
             x1 = self.up(x1)
             # Align dimensions when upsampling yields odd sizes
             if x1.size(2) != x2.size(2) or x1.size(3) != x2.size(3):
+                assert F is not None
                 x1 = F.interpolate(x1, size=(x2.size(2), x2.size(3)), mode="bilinear", align_corners=True)
+            assert torch is not None
             x = torch.cat([x2, x1], dim=1)
             return self.conv(x)
 
@@ -163,6 +168,7 @@ if HAS_TORCH:
 
         def __init__(self, in_channels: int = 1, base: int = 32):
             super().__init__()
+            assert nn is not None
             self.inc = DoubleConv(in_channels, base)
             self.d1 = Down(base, base * 2)
             self.d2 = Down(base * 2, base * 4)
@@ -183,28 +189,40 @@ if HAS_TORCH:
             return self.outc(x)
 
 
-def run_unet_inference(
+def run_unet_probabilities(
     patch: Any,
     checkpoint: Path = CHECKPOINT_PATH,
-    threshold: float = 0.5,
 ) -> Optional[Any]:
     """Run the trained U-Net on a grayscale SAR patch.
 
-    Returns a binary mask (0/1 uint8) when torch + a checkpoint are available,
-    otherwise ``None`` (the caller falls back to demo mode).
+    Returns per-pixel oil probabilities when torch + a checkpoint are
+    available, otherwise ``None`` (the caller falls back to demo mode).
     """
-    if not (HAS_TORCH and checkpoint and Path(checkpoint).is_file()):
+    if (
+        torch is None
+        or nn is None
+        or F is None
+        or np is None
+        or not checkpoint
+        or not Path(checkpoint).is_file()
+    ):
         return None
 
     try:
-        model = UNet()
         state = torch.load(
             str(checkpoint),
             map_location="cpu",
             weights_only=False,
         )
         if isinstance(state, dict) and "state_dict" in state:
+            config = state.get("config", {})
+            model = UNet(
+                in_channels=int(config.get("input_channels", 1)),
+                base=int(config.get("base", 32)),
+            )
             state = state["state_dict"]
+        else:
+            model = UNet()
         model.load_state_dict(state)
         model.eval()
     except Exception as exc:  # pragma: no cover - defensive
@@ -225,7 +243,21 @@ def run_unet_inference(
         logits = model(tensor)
         prob = torch.sigmoid(logits)[0, 0, :h, :w].numpy()
 
-    return (prob >= threshold).astype(np.uint8)
+    return prob
+
+
+def run_unet_inference(
+    patch: Any,
+    checkpoint: Path = CHECKPOINT_PATH,
+    threshold: float = 0.5,
+) -> Optional[Any]:
+    """Run the trained U-Net and return a binary 0/1 uint8 oil mask."""
+    probabilities = run_unet_probabilities(patch, checkpoint)
+    if probabilities is None:
+        return None
+    if np is None:  # pragma: no cover - probabilities require numpy
+        raise RuntimeError("numpy is required for U-Net inference.")
+    return (probabilities >= threshold).astype(np.uint8)
 
 
 # ===========================================================================
@@ -240,7 +272,7 @@ def synthesize_sar_patch(size: int = 256, seed: Optional[int] = None) -> Tuple[A
 
     Requires numpy; raises a clear error if it is missing.
     """
-    if not HAS_NUMPY:  # pragma: no cover - numpy ships with requirements.txt
+    if np is None:  # pragma: no cover - numpy ships with requirements.txt
         raise RuntimeError(
             "numpy is required for the Spill Sense ML pipeline. "
             "Install it with: pip install numpy"
@@ -294,6 +326,8 @@ def synthesize_sar_patch(size: int = 256, seed: Optional[int] = None) -> Tuple[A
 
 def _mock_segmentation_mask(mask_gt: Any, seed: int = 7) -> Any:
     """Perturb a ground-truth mask to simulate imperfect CNN segmentation."""
+    if np is None:  # pragma: no cover - required by the demo pipeline
+        raise RuntimeError("numpy is required for the Spill Sense ML pipeline.")
     predicted = np.array(mask_gt, copy=True)
     flip = np.random.default_rng(seed).random(predicted.shape)
     predicted[flip < 0.012] = 1 - predicted[flip < 0.012]  # ~1.2% salt & pepper
@@ -303,12 +337,12 @@ def _mock_segmentation_mask(mask_gt: Any, seed: int = 7) -> Any:
 # ===========================================================================
 # DBSCAN-BASED CLUSTERING OF OIL PIXELS
 # ===========================================================================
-def _grid_connectivity_labels(coords: List[Tuple[int, int]], eps_px: int) -> List[int]:
+def _grid_connectivity_labels(coords: List[Tuple[float, float]], eps_px: int) -> List[int]:
     """Very small pure-Python 4-connectivity fallback used when scikit-learn
     is not installed. Merges any pixels within ``eps_px`` Chebyshev distance."""
     coords = list(coords)
     labels: List[int] = [-1] * len(coords)
-    lookup: Dict[Tuple[int, int], int] = {}
+    lookup: Dict[Tuple[float, float], int] = {}
     next_label = 0
 
     for idx, (x, y) in enumerate(coords):
@@ -345,7 +379,7 @@ def cluster_oil_pixels(
     real scikit-learn DBSCAN or the fallback was used. Label ``-1`` = noise.
     """
     if HAS_SKLEARN and _SKLEARN_DBSCAN is not None:
-        if HAS_NUMPY:
+        if HAS_NUMPY and np is not None:
             coords = np.asarray(coords, dtype=np.float64)
             if coords.ndim != 2 or coords.shape[0] == 0:
                 return [], "scikit-learn DBSCAN"
@@ -419,6 +453,8 @@ def pixel_to_latlon(
 
 
 def _mask_to_binary(mask: Any) -> Any:
+    if np is None:  # pragma: no cover - required by the detection pipeline
+        raise RuntimeError("numpy is required for the Spill Sense ML pipeline.")
     return np.asarray(mask > 0, dtype=np.uint8)
 
 
@@ -434,6 +470,11 @@ def run_detection(
     eps_px: float = 3.0,
     min_samples: int = 8,
     min_pixels: int = 25,
+    image_patch: Optional[Any] = None,
+    invalid_mask: Optional[Any] = None,
+    pixel_to_geo: Optional[Callable[[float, float], Tuple[float, float]]] = None,
+    pixel_area_km2: Optional[float] = None,
+    input_source: str = "synthetic",
 ) -> Dict[str, Any]:
     """Run the full segmentation + clustering pipeline and return GeoJSON.
 
@@ -451,20 +492,43 @@ def run_detection(
       "preview_png_b64": str | None,
     }
     """
-    if not HAS_NUMPY:  # pragma: no cover
+    if np is None:  # pragma: no cover
         raise RuntimeError("numpy is required for the Spill Sense ML pipeline.")
 
-    patch, mask_gt = synthesize_sar_patch(size=patch_size)
+    if image_patch is None:
+        patch, mask_gt = synthesize_sar_patch(size=patch_size)
+    else:
+        patch = np.asarray(image_patch)
+        if patch.ndim != 2 or not patch.size:
+            raise ValueError("Detection image must be a non-empty grayscale patch.")
+        mask_gt = None
+    height, width = patch.shape
+
+    if invalid_mask is not None:
+        invalid_mask = np.asarray(invalid_mask, dtype=bool)
+        if invalid_mask.shape != patch.shape:
+            raise ValueError("Invalid-pixel mask must match the image dimensions.")
 
     # --- Stage 1: UNet segmentation (real model OR demo mask) ---------------
-    predicted = run_unet_inference(patch, CHECKPOINT_PATH, threshold=threshold)
-    mode = "real" if predicted is not None else "demo"
-    if predicted is None:
+    probabilities = run_unet_probabilities(patch, CHECKPOINT_PATH)
+    mode = "real" if probabilities is not None else "demo"
+    if probabilities is None:
+        if mask_gt is None:
+            raise RuntimeError("A trained U-Net checkpoint is required for supplied imagery.")
         predicted = _mock_segmentation_mask(mask_gt)
+    else:
+        predicted = probabilities >= threshold
     predicted = _mask_to_binary(predicted)
+    if invalid_mask is not None:
+        predicted[invalid_mask] = 0
 
     ys, xs = np.nonzero(predicted)
     oil_pixels = int(len(xs))
+    if oil_pixels > 20000:
+        raise ValueError(
+            "Predicted mask exceeds the 20,000-pixel clustering limit; "
+            "use a lower-resolution input or adjust the detection threshold."
+        )
 
     # --- Stage 2: DBSCAN clustering of oil pixels ---------------------------
     labels, engine_name = cluster_oil_pixels(
@@ -483,32 +547,50 @@ def run_detection(
         cx = xs[idxs]
         cy = ys[idxs]
 
-        # Agreement with ground truth = demo-confidence proxy
-        conf = float(np.mean(mask_gt[cy, cx] > 0)) if mode == "demo" else float(
-            np.mean(predicted[cy, cx])
-        )
+        if probabilities is not None:
+            score_type = "mean_model_probability"
+            score = float(np.mean(probabilities[cy, cx]))
+        else:
+            if mask_gt is None:
+                raise RuntimeError("Synthetic ground truth is unavailable for demo scoring.")
+            score_type = "synthetic_ground_truth_agreement"
+            score = float(np.mean(mask_gt[cy, cx] > 0))
 
         pts = list(zip([float(v) for v in cx], [float(v) for v in cy]))
         hull = convex_hull(pts)
 
-        ring = [[
-            pixel_to_latlon(px, py, patch_size, patch_size, center_lat, center_lon, resolution_m)[::-1]  # (lon, lat)
-            for px, py in hull
-        ]]
+        if pixel_to_geo is None:
+            geographic_points = [
+                pixel_to_latlon(
+                    px, py, width, height, center_lat, center_lon, resolution_m
+                )
+                for px, py in hull
+            ]
+            centroid_lat, centroid_lon = pixel_to_latlon(
+                float(np.mean(cx)), float(np.mean(cy)), width, height,
+                center_lat, center_lon, resolution_m,
+            )
+        else:
+            geographic_points = [pixel_to_geo(px, py) for px, py in hull]
+            centroid_lat, centroid_lon = pixel_to_geo(
+                float(np.mean(cx)), float(np.mean(cy))
+            )
+        ring = [[(lon, lat) for lat, lon in geographic_points]]
         # Close the ring
         ring[0].append(ring[0][0])
 
-        area_km2 = len(idxs) * (resolution_m / 1000.0) ** 2
-        centroid_lat, centroid_lon = pixel_to_latlon(
-            float(np.mean(cx)), float(np.mean(cy)), patch_size, patch_size,
-            center_lat, center_lon, resolution_m,
+        area_km2 = len(idxs) * (
+            pixel_area_km2
+            if pixel_area_km2 is not None
+            else (resolution_m / 1000.0) ** 2
         )
 
         clusters.append({
             "cluster_id": int(cid),
             "oil_pixels": int(len(idxs)),
             "area_km2": round(area_km2, 4),
-            "confidence_pct": round(float(conf) * 100.0, 1),
+            "score_pct": round(score * 100.0, 1),
+            "score_type": score_type,
             "centroid": [round(centroid_lat, 6), round(centroid_lon, 6)],
         })
         features.append({
@@ -517,7 +599,8 @@ def run_detection(
                 "cluster_id": int(cid),
                 "area_km2": round(area_km2, 4),
                 "oil_pixels": int(len(idxs)),
-                "confidence_pct": round(float(conf) * 100.0, 1),
+                "score_pct": round(score * 100.0, 1),
+                "score_type": score_type,
                 "centroid": [round(centroid_lat, 6), round(centroid_lon, 6)],
             },
             "geometry": {"type": "Polygon", "coordinates": ring},
@@ -535,10 +618,13 @@ def run_detection(
             "min_pixels": min_pixels,
         },
         "input": {
+            "source": input_source,
             "center_lat": center_lat,
             "center_lon": center_lon,
             "resolution_m": resolution_m,
-            "patch_size": patch_size,
+            "patch_size": patch_size if image_patch is None else height,
+            "image_width": width,
+            "image_height": height,
             "threshold": threshold,
         },
         "segmentation": {
@@ -551,24 +637,136 @@ def run_detection(
             "features": features,
         },
         "preview_png_b64": _build_preview_png(patch, mask_gt, predicted),
-        "warning": "Investigation support, not final proof.",
+        "warning": (
+            "Investigation support, not final proof. Model scores are not "
+            "validated for real-world oil-spill accuracy."
+        ),
     }
+
+
+def run_detection_on_geotiff(
+    geotiff_data: bytes,
+    backscatter_min_db: float = -30.0,
+    backscatter_max_db: float = 0.0,
+    threshold: float = 0.5,
+    max_dimension: int = 256,
+) -> Dict[str, Any]:
+    """Detect on a single-band, metre-projected GeoTIFF with dB backscatter."""
+    if not math.isfinite(backscatter_min_db) or not math.isfinite(backscatter_max_db):
+        raise ValueError("Backscatter dB bounds must be finite numbers.")
+    if backscatter_min_db >= backscatter_max_db:
+        raise ValueError("backscatter_min_db must be less than backscatter_max_db.")
+    if max_dimension < 16:
+        raise ValueError("max_dimension must be at least 16 pixels.")
+    if not geotiff_data:
+        raise ValueError("GeoTIFF upload is empty.")
+    if torch is None or not has_checkpoint():
+        raise RuntimeError("A trained U-Net checkpoint is required for satellite imagery.")
+    if np is None:
+        raise RuntimeError("numpy is required for GeoTIFF inference.")
+
+    try:
+        from rasterio.errors import RasterioError
+        from rasterio.enums import Resampling
+        from rasterio.io import MemoryFile
+        from rasterio.transform import Affine
+        from rasterio.warp import transform as transform_coordinates
+    except ImportError as exc:  # pragma: no cover - depends on optional ML dependencies
+        raise RuntimeError(
+            "GeoTIFF support requires rasterio. Install requirements-ml.txt."
+        ) from exc
+
+    with MemoryFile(geotiff_data) as memory_file:
+        try:
+            dataset_context = memory_file.open()
+        except RasterioError as exc:
+            raise ValueError("Upload is not a readable GeoTIFF.") from exc
+        with dataset_context as dataset:
+            if dataset.count != 1:
+                raise ValueError(
+                    "GeoTIFF must contain exactly one band; select one calibrated polarization."
+                )
+            if dataset.crs is None or not dataset.crs.is_projected:
+                raise ValueError("GeoTIFF must have a projected coordinate reference system.")
+            unit_name, unit_conversion_factor = dataset.crs.linear_units_factor
+            if unit_name.lower() not in {"metre", "meter"}:
+                raise ValueError("GeoTIFF projected coordinates must use metres.")
+            if dataset.width < 1 or dataset.height < 1:
+                raise ValueError("GeoTIFF dimensions must be non-zero.")
+
+            scale = min(1.0, max_dimension / max(dataset.width, dataset.height))
+            width = max(1, int(round(dataset.width * scale)))
+            height = max(1, int(round(dataset.height * scale)))
+            source = dataset.read(
+                1,
+                out_shape=(height, width),
+                masked=True,
+                resampling=Resampling.bilinear,
+            )
+            source = np.ma.asarray(source, dtype=np.float32)
+            invalid = np.ma.getmaskarray(source) | ~np.isfinite(source.filled(np.nan))
+            backscatter = source.filled(backscatter_min_db)
+            normalized = np.clip(
+                (backscatter - backscatter_min_db)
+                / (backscatter_max_db - backscatter_min_db),
+                0.0,
+                1.0,
+            )
+            image_patch = np.rint(normalized * 255.0).astype(np.uint8)
+            image_patch[invalid] = 0
+
+            image_transform = dataset.transform @ Affine.scale(
+                dataset.width / width,
+                dataset.height / height,
+            )
+            pixel_area_km2 = abs(
+                image_transform.a * image_transform.e
+                - image_transform.b * image_transform.d
+            ) * unit_conversion_factor**2 / 1_000_000.0
+            if not math.isfinite(pixel_area_km2) or pixel_area_km2 <= 0:
+                raise ValueError("GeoTIFF has an invalid pixel-to-ground transform.")
+            source_crs = dataset.crs
+
+    def pixel_to_geo(column: float, row: float) -> Tuple[float, float]:
+        easting, northing = image_transform @ (column + 0.5, row + 0.5)
+        coordinates = transform_coordinates(
+            source_crs, "EPSG:4326", [easting], [northing]
+        )
+        longitudes, latitudes = coordinates[0], coordinates[1]
+        return latitudes[0], longitudes[0]
+
+    center_lat, center_lon = pixel_to_geo((width - 1) / 2, (height - 1) / 2)
+    result = run_detection(
+        center_lat=center_lat,
+        center_lon=center_lon,
+        resolution_m=math.sqrt(pixel_area_km2) * 1000.0,
+        patch_size=height,
+        threshold=threshold,
+        image_patch=image_patch,
+        invalid_mask=invalid,
+        pixel_to_geo=pixel_to_geo,
+        pixel_area_km2=pixel_area_km2,
+        input_source="sentinel1_geotiff",
+    )
+    result["input"]["backscatter_min_db"] = backscatter_min_db
+    result["input"]["backscatter_max_db"] = backscatter_max_db
+    return result
 
 
 def _build_preview_png(patch: Any, mask_gt: Any, predicted: Any) -> Optional[str]:
     """Render a small composite preview (SAR | segmentation overlay) as a
     base64 PNG data-URI. Returns None when Pillow is unavailable."""
-    if not HAS_PIL:
+    if not HAS_PIL or Image is None or np is None:
         return None
     try:
-        size = patch.shape[0]
-        rgb = np.zeros((size, size * 2, 3), dtype=np.uint8)
+        height, width = patch.shape
+        rgb = np.zeros((height, width * 2, 3), dtype=np.uint8)
         # Left: raw SAR patch
-        rgb[:, :size, :] = np.stack([patch] * 3, axis=-1)
+        rgb[:, :width, :] = np.stack([patch] * 3, axis=-1)
         # Right: dark panel, amber where segmented oil
-        rgb[:, size:, :] = (16, 24, 40)
+        rgb[:, width:, :] = (16, 24, 40)
         overlay = (predicted > 0)
-        rgb[:, size:, :][overlay] = (255, 130, 40)
+        rgb[:, width:, :][overlay] = (255, 130, 40)
 
         buf = io.BytesIO()
         Image.fromarray(rgb).save(buf, format="PNG")

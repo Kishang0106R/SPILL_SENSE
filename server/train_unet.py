@@ -8,7 +8,7 @@ image/mask pairs, or on auto-generated synthetic scenes for development.
 Usage
 -----
     # 1) Train on your own labeled SAR data (dir with images/ and masks/)
-    python server/train_unet.py --data path/to/dataset --epochs 40
+    python server/train_unet.py --data path/to/train --validation-data path/to/validation --epochs 40
 
     # 2) Train on synthetic scenes (no data required) -- great for a first run
     python server/train_unet.py --synthetic --samples 600 --epochs 30
@@ -16,9 +16,8 @@ Usage
     # 3) Resume / fine-tune from an existing checkpoint
     python server/train_unet.py --synthetic --resume server/checkpoints/unet_oil_spill.pth
 
-Checkpoint is saved to ``server/checkpoints/unet_oil_spill.pth`` where
-``server/ml_detector.py`` will pick it up automatically (the web API then
-switches from demo mode to *real* inference).
+The default candidate checkpoint is saved separately from the production
+checkpoint used by ``server/ml_detector.py``.
 
 Dataset layout
 --------------
@@ -47,7 +46,6 @@ from torch.utils.data import DataLoader, Dataset  # noqa: E402
 from server.ml_detector import (  # noqa: E402
     CHECKPOINT_DIR,
     CHECKPOINT_PATH,
-    DoubleConv,  # reused below in-channel expansion not needed; harmless import
     UNet,
     synthesize_sar_patch,
 )
@@ -58,7 +56,13 @@ from server.ml_detector import (  # noqa: E402
 class PairedSAROODataset(Dataset):
     """Reads grayscale images and matching binary masks from two folders."""
 
-    def __init__(self, images_dir: Path, masks_dir: Path, patch: int = 256):
+    def __init__(
+        self,
+        images_dir: Path,
+        masks_dir: Path,
+        patch: int = 256,
+        random_crop: bool = True,
+    ):
         self.files = sorted(images_dir.glob("*.png")) + sorted(images_dir.glob("*.jpg"))
         if not self.files:
             raise RuntimeError(f"No images found in {images_dir}")
@@ -68,6 +72,7 @@ class PairedSAROODataset(Dataset):
 
         self.cv2 = cv2
         self.patch = patch
+        self.random_crop = random_crop
 
     def __len__(self) -> int:
         return len(self.files)
@@ -77,27 +82,36 @@ class PairedSAROODataset(Dataset):
         mask_path = self.masks_dir / img_path.name
         if not mask_path.exists():
             mask_path = self.masks_dir / (img_path.stem + ".png")
+        if not mask_path.is_file():
+            raise FileNotFoundError(
+                f"Required segmentation mask for {img_path.name} not found "
+                f"in {self.masks_dir}."
+            )
 
         img = self.cv2.imread(str(img_path), self.cv2.IMREAD_GRAYSCALE)
         msk = self.cv2.imread(str(mask_path), self.cv2.IMREAD_GRAYSCALE)
         if img is None:
             raise RuntimeError(f"Could not read image {img_path}")
-
-        if msk is not None:
-            msk = (msk > 127).astype(np.uint8)
-        else:
-            msk = np.zeros_like(img)
+        if msk is None:
+            raise RuntimeError(f"Could not read required segmentation mask {mask_path}")
+        msk = (msk > 0).astype(np.uint8)
 
         # Random crop to patch size (keeps some augmentation)
         h, w = img.shape
         if h >= self.patch and w >= self.patch:
-            y0 = random.randint(0, h - self.patch)
-            x0 = random.randint(0, w - self.patch)
+            if self.random_crop:
+                y0 = random.randint(0, h - self.patch)
+                x0 = random.randint(0, w - self.patch)
+            else:
+                y0 = (h - self.patch) // 2
+                x0 = (w - self.patch) // 2
             img = img[y0:y0 + self.patch, x0:x0 + self.patch]
             msk = msk[y0:y0 + self.patch, x0:x0 + self.patch]
         else:
             img = self.cv2.resize(img, (self.patch, self.patch))
-            msk = self.cv2.resize(msk, (self.patch, self.patch))
+            msk = self.cv2.resize(
+                msk, (self.patch, self.patch), interpolation=self.cv2.INTER_NEAREST
+            )
 
         t_img = torch.from_numpy(img.astype(np.float32) / 255.0).unsqueeze(0)
         t_msk = torch.from_numpy(msk.astype(np.float32)).unsqueeze(0)
@@ -135,12 +149,46 @@ def dice_loss(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-6) -> to
     return 1.0 - (2.0 * inter + eps) / (p.sum() + target.sum() + eps)
 
 
+def evaluate(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    loss_fn: nn.Module,
+) -> tuple[float, float]:
+    model.eval()
+    total_loss = 0.0
+    total_intersection = 0.0
+    total_union = 0.0
+    batches = 0
+
+    with torch.no_grad():
+        for images, masks in loader:
+            images = images.to(device)
+            masks = masks.to(device)
+            logits = model(images)
+            total_loss += (loss_fn(logits, masks) + dice_loss(logits, masks)).item()
+            predictions = (logits > 0).float()
+            total_intersection += (predictions * masks).sum().item()
+            total_union += (predictions + masks).clamp(max=1).sum().item()
+            batches += 1
+
+    avg_loss = total_loss / max(batches, 1)
+    micro_iou = total_intersection / (total_union + 1e-6)
+    return avg_loss, micro_iou
+
+
 # ---------------------------------------------------------------------------
 # Training loop
 # ---------------------------------------------------------------------------
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train Spill Sense UNet from scratch")
     parser.add_argument("--data", type=Path, default=None, help="dir containing images/ and masks/")
+    parser.add_argument(
+        "--validation-data",
+        type=Path,
+        default=None,
+        help="separate validation dir containing images/ and masks/ (required with --data)",
+    )
     parser.add_argument("--synthetic", action="store_true", help="train on generated synthetic scenes")
     parser.add_argument("--samples", type=int, default=500, help="synthetic samples")
     parser.add_argument("--patch", type=int, default=256, help="patch size")
@@ -148,14 +196,28 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--base", type=int, default=32, help="UNet base channels")
-    parser.add_argument("--save", type=Path, default=CHECKPOINT_PATH, help="checkpoint output path")
+    parser.add_argument(
+        "--save",
+        type=Path,
+        default=CHECKPOINT_DIR / "unet_oil_spill_candidate.pth",
+        help="candidate checkpoint output path (production checkpoint is never overwritten)",
+    )
     parser.add_argument("--resume", type=Path, default=None, help="checkpoint to resume from")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no-cuda", action="store_true")
     args = parser.parse_args()
 
-    if not args.data and not args.synthetic:
-        parser.error("provide --data <dir> or --synthetic")
+    if (args.data is None and not args.synthetic) or (args.data is not None and args.synthetic):
+        parser.error("provide either --data <dir> or --synthetic")
+    if args.data and not args.validation_data:
+        parser.error("--validation-data is required when training on labeled data")
+    if args.synthetic and args.validation_data:
+        parser.error("--validation-data cannot be used with --synthetic")
+    if args.data and args.validation_data:
+        if args.data.resolve() == args.validation_data.resolve():
+            parser.error("training and validation directories must be separate")
+    if args.save.resolve() == CHECKPOINT_PATH.resolve():
+        parser.error("--save cannot target the production checkpoint")
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -166,14 +228,36 @@ def main() -> None:
 
     if args.synthetic:
         dataset = SyntheticOODataset(size=args.patch, samples=args.samples, seed=args.seed)
-        print(f"training on {args.samples} synthetic scenes")
+        if args.samples < 2:
+            parser.error("--samples must be at least 2 to create a validation split")
+        val_count = max(1, round(args.samples * 0.2))
+        train_count = args.samples - val_count
+        train_dataset, val_dataset = torch.utils.data.random_split(
+            dataset,
+            (train_count, val_count),
+            generator=torch.Generator().manual_seed(args.seed),
+        )
+        print(
+            f"training on {train_count} synthetic scenes; "
+            f"validating on {val_count} held-out scenes"
+        )
     else:
+        assert args.data is not None and args.validation_data is not None
         images_dir = args.data / "images"
         masks_dir = args.data / "masks"
-        dataset = PairedSAROODataset(images_dir, masks_dir, patch=args.patch)
-        print(f"training on {len(dataset)} labeled pairs from {args.data}")
+        train_dataset = PairedSAROODataset(images_dir, masks_dir, patch=args.patch)
+        val_images_dir = args.validation_data / "images"
+        val_masks_dir = args.validation_data / "masks"
+        val_dataset = PairedSAROODataset(
+            val_images_dir, val_masks_dir, patch=args.patch, random_crop=False
+        )
+        print(
+            f"training on {len(train_dataset)} labeled pairs from {args.data}; "
+            f"validating on {len(val_dataset)} pairs from {args.validation_data}"
+        )
 
-    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=0)
+    loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
 
     model = UNet(in_channels=1, base=args.base).to(device)
     start_epoch = 0
@@ -192,7 +276,7 @@ def main() -> None:
 
     args.save.parent.mkdir(parents=True, exist_ok=True)
 
-    best_iou = 0.0
+    best_iou = -1.0
     for epoch in range(start_epoch, args.epochs):
         model.train()
         total_loss, total_iou, n = 0.0, 0.0, 0
@@ -213,14 +297,19 @@ def main() -> None:
         scheduler.step()
         avg_loss = total_loss / max(n, 1)
         avg_iou = total_iou / max(n, 1)
+        val_loss, val_iou = evaluate(model, val_loader, device, bce)
 
         checkpoint_state = {
             "epoch": epoch + 1,
             "model": "unet",
             "state_dict": model.state_dict(),
             "optimizer": optimizer.state_dict(),
-            "iou": avg_iou,
-            "loss": avg_loss,
+            "iou": val_iou,
+            "train_iou": avg_iou,
+            "val_iou": val_iou,
+            "loss": val_loss,
+            "train_loss": avg_loss,
+            "val_loss": val_loss,
             "config": {
                 "input_channels": 1,
                 "output_channels": 1,
@@ -229,16 +318,22 @@ def main() -> None:
             },
         }
 
-        if avg_iou >= best_iou:
-            best_iou = avg_iou
+        if val_iou > best_iou:
+            best_iou = val_iou
             torch.save(checkpoint_state, str(args.save))
-            torch.save(checkpoint_state, str(args.save).replace(".pth", "_best.pth"))
+            best_path = args.save.with_name(f"{args.save.stem}_best{args.save.suffix}")
+            torch.save(checkpoint_state, str(best_path))
 
-        torch.save(checkpoint_state, str(args.save).replace(".pth", "_last.pth"))
-        print(f"epoch {epoch + 1}/{args.epochs}  loss={avg_loss:.4f}  iou={avg_iou:.4f}  best_iou={best_iou:.4f}")
+        last_path = args.save.with_name(f"{args.save.stem}_last{args.save.suffix}")
+        torch.save(checkpoint_state, str(last_path))
+        print(
+            f"epoch {epoch + 1}/{args.epochs}  train_loss={avg_loss:.4f}  "
+            f"train_iou={avg_iou:.4f}  val_loss={val_loss:.4f}  "
+            f"val_iou={val_iou:.4f}  best_val_iou={best_iou:.4f}"
+        )
 
     print(f"\nDone. Checkpoint saved to {args.save}")
-    print("Serve the app and the API will switch to real UNet inference automatically.")
+    print("Evaluate the candidate checkpoint before promoting it for API inference.")
 
 
 if __name__ == "__main__":

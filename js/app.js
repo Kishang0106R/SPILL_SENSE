@@ -4,6 +4,7 @@
 
 document.addEventListener('DOMContentLoaded', async () => {
   const apiUrl = (path) => `${(window.SPILLGUARD_API_BASE || '').replace(/\/$/, '')}${path}`;
+  let hasBootstrapData = false;
 
   // The static fixture remains as an offline fallback when the API is unavailable.
   try {
@@ -11,6 +12,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (!response.ok) throw new Error(`API returned ${response.status}`);
     const serverData = await response.json();
     Object.assign(SPILLGUARD_DATA, serverData);
+    hasBootstrapData = true;
   } catch (error) {
     console.warn('Spill Sense API unavailable; using bundled demo data.', error);
   }
@@ -51,7 +53,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       ml: null,
       alerts: null
     },
-    liveVesselInterval: null
+    liveVesselInterval: null,
+    liveVesselRefreshTimeout: null,
+    liveVesselRequestId: 0
   };
 
   state.masterVessels = Array.isArray(SPILLGUARD_DATA.vessels) ? [...SPILLGUARD_DATA.vessels] : [];
@@ -325,6 +329,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         L.tileLayer(`https://api.maptiler.com/maps/hybrid-v4/256/{z}/{x}/{y}.jpg?key=${encodeURIComponent(mapTilerKey)}`, {
           tileSize: 256,
           maxZoom: 20,
+          noWrap: true,
           attribution: '&copy; MapTiler &copy; OpenStreetMap contributors'
         }).addTo(state.map);
       } else if (mapboxToken) {
@@ -334,12 +339,14 @@ document.addEventListener('DOMContentLoaded', async () => {
           tileSize: 512,
           zoomOffset: -1,
           maxZoom: 20,
+          noWrap: true,
           attribution: '© Mapbox © OpenStreetMap'
         }).addTo(state.map);
       } else {
         L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
           subdomains: 'abcd',
           maxZoom: 20,
+          noWrap: true,
           attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
         }).addTo(state.map);
       }
@@ -348,6 +355,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
         subdomains: 'abcd',
         maxZoom: 20,
+        noWrap: true,
         attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
       }).addTo(state.map);
       console.warn('Map tiles failed, falling back to CARTO:', e);
@@ -372,6 +380,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     renderMapData();
     renderMaritimeCorridor();
+    state.map.on('moveend', scheduleLiveVesselFetch);
     startLiveVesselFeed();
     state.isLeafletInit = true;
 
@@ -530,17 +539,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   function renderMaritimeCorridor() {
     if (!state.map) return;
 
-    const region = SPILLGUARD_DATA.regions[state.currentRegion];
-    const overlays = region && region.overlays;
-    if (!overlays || !Array.isArray(overlays.corridor)) {
-      console.warn(`Missing overlay configuration for region: ${state.currentRegion}`);
-      return;
-    }
-
-    // Clear previous corridor / POI layers
     state.layers.corridor.clearLayers();
     state.layers.waypoints.clearLayers();
     state.layers.poiFeatures.clearLayers();
+
+    const region = SPILLGUARD_DATA.regions[state.currentRegion];
+    const overlays = region && region.overlays;
+    if (!overlays || !Array.isArray(overlays.corridor)) {
+      if (region) console.warn(`Missing overlay configuration for region: ${state.currentRegion}`);
+      return;
+    }
 
     // ---- 1. Red Dashed Maritime Corridor (shipping lane polyline) ----
     const corridorCoords = overlays.corridor;
@@ -618,16 +626,20 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // =========================================================================
   // LIVE VESSEL POSITION FEED (30-second auto-refresh)
-  // Uses the Digi-Traffic / Finnish AIS open API as a reliable public source.
-  // Fallback: simulated data if the API is unreachable.
+  // AISStream credentials and ingestion stay on the backend.
   // =========================================================================
   function buildVesselApiUrl() {
-    const region = SPILLGUARD_DATA.regions[state.currentRegion];
-    const feed = region && region.liveFeed;
-    if (!feed) return null;
-    // Fetch vessels updated in the last 5 minutes
-    const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-    return `https://meri.digitraffic.fi/api/ais/v1/locations?latitude=${feed.lat}&longitude=${feed.lon}&radius=${feed.radius}&from=${encodeURIComponent(fiveMinAgo)}`;
+    if (!state.map) return null;
+    const bounds = state.map.getBounds();
+    const params = new URLSearchParams({
+      min_lat: bounds.getSouth().toString(),
+      min_lon: bounds.getWest().toString(),
+      max_lat: bounds.getNorth().toString(),
+      max_lon: bounds.getEast().toString(),
+      limit: '200',
+      track_hours: '6'
+    });
+    return apiUrl(`/api/ais/vessels?${params}`);
   }
 
   // Simulated vessel positions for the selected region when live AIS is unavailable.
@@ -650,51 +662,276 @@ document.addEventListener('DOMContentLoaded', async () => {
   async function fetchLiveVesselPositions() {
     if (!state.map || !state.layers.liveVessels) return;
 
-    const regionAtRequest = state.currentRegion;
+    const requestId = ++state.liveVesselRequestId;
     let vessels = [];
+    let feedSource = 'SOURCE UNVERIFIED';
+    let usedFallback = false;
 
     try {
       const vesselApiUrl = buildVesselApiUrl();
-      if (!vesselApiUrl) throw new Error('No vessel feed configured for region');
+      if (!vesselApiUrl) return;
       const resp = await fetch(vesselApiUrl, {
         signal: AbortSignal.timeout(8000)
       });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json();
-
-      // Digi-Traffic returns { features: [...] } in GeoJSON
-      if (data && Array.isArray(data.features)) {
-        vessels = data.features.slice(0, 30).map(f => ({
-          mmsi: f.mmsi || f.properties?.mmsi || 0,
-          name: f.properties?.name || `Vessel ${f.mmsi || '?'}`,
-          lat: f.geometry?.coordinates?.[1] ?? 0,
-          lon: f.geometry?.coordinates?.[0] ?? 0,
-          speed: f.properties?.sog ?? 0,
-          heading: f.properties?.cog ?? 0
-        }));
-      }
+      if (!Array.isArray(data)) throw new Error('AIS API returned an invalid vessel list');
+      vessels = data;
+      const source = resp.headers.get('X-AIS-Data-Source');
+      feedSource = source === 'live' ? 'LIVE AIS' : source === 'demo' ? 'DEMO SIMULATION' : 'SOURCE UNVERIFIED';
     } catch (err) {
-      console.warn('Live vessel API unavailable, using simulated data:', err.message);
+      console.warn('Live AIS API unavailable, using simulated data:', err.message);
+      feedSource = 'DEMO SIMULATION';
+      usedFallback = true;
     }
 
-    // Fallback to simulation if API returned nothing
-    if (!vessels.length) {
+    if (usedFallback) {
       vessels = getSimulatedVessels();
     }
 
-    if (regionAtRequest === state.currentRegion) updateLiveVesselMarkers(vessels);
+    if (requestId !== state.liveVesselRequestId) return;
+    const visibleCount = vessels.filter(v => Number.isFinite(v.lat) && Number.isFinite(v.lon)).length;
+    updateLiveVesselMarkers(vessels, feedSource);
+
+    const statusEl = document.getElementById('ais-coverage-status');
+    if (!statusEl) return;
+    if (usedFallback) {
+      statusEl.textContent = visibleCount
+        ? `DEMO SIMULATION · Backend unavailable; showing ${visibleCount} local fixture(s).`
+        : 'DEMO SIMULATION · Backend unavailable; no local fixtures in this view.';
+    } else if (visibleCount) {
+      statusEl.textContent = `${feedSource} · ${visibleCount} observation(s) in the current view.`;
+    } else {
+      statusEl.textContent = `${feedSource} · No observations returned for this view. This does not mean no vessels are present.`;
+    }
   }
 
-  function updateLiveVesselMarkers(vessels) {
+  const satelliteSearchModal = document.getElementById('satellite-search-modal');
+  const satelliteSearchStatus = document.getElementById('satellite-search-status');
+  const satelliteSearchResults = document.getElementById('satellite-search-results');
+  const selectedScenePanel = document.getElementById('satellite-selected-scene');
+  const selectedSceneName = document.getElementById('satellite-selected-scene-name');
+  const geotiffInput = document.getElementById('satellite-geotiff-file');
+  const runDetectionButton = document.getElementById('btn-run-satellite-detection');
+  const detectionResult = document.getElementById('satellite-detection-result');
+  let selectedSatelliteScene = null;
+
+  function openSatelliteSearch() {
+    if (!satelliteSearchModal) return;
+    const end = new Date();
+    const start = new Date(end.getTime() - 30 * 24 * 60 * 60 * 1000);
+    document.getElementById('satellite-search-start').value = start.toISOString().slice(0, 10);
+    document.getElementById('satellite-search-end').value = end.toISOString().slice(0, 10);
+    satelliteSearchModal.classList.add('is-open');
+    satelliteSearchModal.setAttribute('aria-hidden', 'false');
+    document.getElementById('satellite-search-title')?.focus();
+  }
+
+  function closeSatelliteSearch() {
+    satelliteSearchModal?.classList.remove('is-open');
+    satelliteSearchModal?.setAttribute('aria-hidden', 'true');
+  }
+
+  function addSceneText(parent, className, text) {
+    const element = document.createElement('div');
+    element.className = className;
+    element.textContent = text || 'Not provided by catalog';
+    parent.appendChild(element);
+    return element;
+  }
+
+  function formatAcquisitionTime(value) {
+    if (!value) return 'Acquisition time unavailable';
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? value : `${date.toISOString().replace('T', ' ').replace('.000Z', ' UTC')}`;
+  }
+
+  function selectSatelliteScene(scene) {
+    selectedSatelliteScene = scene;
+    selectedScenePanel.hidden = false;
+    selectedSceneName.textContent = scene.id;
+    geotiffInput.value = '';
+    runDetectionButton.disabled = true;
+    detectionResult.hidden = true;
+    detectionResult.textContent = '';
+    if (scene.geometry && state.map) {
+      try {
+        const footprint = L.geoJSON(scene.geometry, {
+          style: { color: '#00D4FF', weight: 2, fillOpacity: 0.08 }
+        }).addTo(state.map);
+        setTimeout(() => {
+          if (state.map && state.map.hasLayer(footprint)) state.map.removeLayer(footprint);
+        }, 15000);
+      } catch (error) {
+        console.warn('Could not draw Sentinel-1 scene footprint:', error);
+      }
+    }
+  }
+
+  function renderSatelliteScenes(products) {
+    satelliteSearchResults.replaceChildren();
+    selectedScenePanel.hidden = true;
+    selectedSatelliteScene = null;
+    products.forEach(scene => {
+      const card = document.createElement('article');
+      card.className = 'satellite-scene-card';
+      const details = document.createElement('div');
+      addSceneText(details, 'satellite-scene-title', scene.id);
+      const acquisitionWindow = scene.acquisition_end
+        ? `${formatAcquisitionTime(scene.acquisition_start)} – ${formatAcquisitionTime(scene.acquisition_end)}`
+        : formatAcquisitionTime(scene.acquisition_start);
+      const metadata = [
+        `${scene.platform || 'Sentinel-1'} · ${acquisitionWindow}`,
+        [scene.processing_level, scene.beam_mode, scene.polarization, scene.flight_direction].filter(Boolean).join(' · ')
+      ].filter(Boolean).join('\n');
+      addSceneText(details, 'satellite-scene-meta', metadata);
+      const actions = document.createElement('div');
+      actions.className = 'satellite-scene-actions';
+      const selectButton = document.createElement('button');
+      selectButton.type = 'button';
+      selectButton.className = 'btn-secondary';
+      selectButton.textContent = 'Select';
+      selectButton.addEventListener('click', () => selectSatelliteScene(scene));
+      actions.appendChild(selectButton);
+      if (scene.download_url) {
+        const downloadLink = document.createElement('a');
+        downloadLink.className = 'btn-secondary';
+        downloadLink.href = scene.download_url;
+        downloadLink.target = '_blank';
+        downloadLink.rel = 'noopener noreferrer';
+        downloadLink.textContent = 'ASF product';
+        actions.appendChild(downloadLink);
+      }
+      if (scene.catalog_url) {
+        const catalogLink = document.createElement('a');
+        catalogLink.href = scene.catalog_url;
+        catalogLink.target = '_blank';
+        catalogLink.rel = 'noopener noreferrer';
+        catalogLink.textContent = 'Catalog';
+        actions.appendChild(catalogLink);
+      }
+      card.append(details, actions);
+      satelliteSearchResults.appendChild(card);
+    });
+  }
+
+  document.getElementById('btn-sentinel-search')?.addEventListener('click', openSatelliteSearch);
+  document.getElementById('btn-close-satellite-search')?.addEventListener('click', closeSatelliteSearch);
+  satelliteSearchModal?.addEventListener('click', event => {
+    if (event.target === satelliteSearchModal) closeSatelliteSearch();
+  });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && satelliteSearchModal?.classList.contains('is-open')) {
+      closeSatelliteSearch();
+    }
+  });
+
+  document.getElementById('btn-run-satellite-search')?.addEventListener('click', async () => {
+    if (!state.map || !satelliteSearchStatus || !satelliteSearchResults) return;
+    const startDate = document.getElementById('satellite-search-start').value;
+    const endDate = document.getElementById('satellite-search-end').value;
+    if (!startDate || !endDate || startDate > endDate) {
+      satelliteSearchStatus.textContent = 'Choose a valid date range before searching.';
+      return;
+    }
+    const bounds = state.map.getBounds();
+    const params = new URLSearchParams({
+      min_lat: bounds.getSouth().toString(),
+      min_lon: bounds.getWest().toString(),
+      max_lat: bounds.getNorth().toString(),
+      max_lon: bounds.getEast().toString(),
+      start: `${startDate}T00:00:00Z`,
+      end: `${endDate}T23:59:59Z`,
+      limit: '25'
+    });
+    const button = document.getElementById('btn-run-satellite-search');
+    button.disabled = true;
+    satelliteSearchStatus.textContent = 'Searching the ASF Sentinel-1 catalog for the current map bounds…';
+    satelliteSearchResults.replaceChildren();
+    try {
+      const response = await fetch(apiUrl(`/api/satellite/sentinel1?${params}`), {
+        signal: AbortSignal.timeout(25000)
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail || `Catalog returned HTTP ${response.status}`);
+      renderSatelliteScenes(result.products || []);
+      satelliteSearchStatus.textContent = result.products?.length
+        ? `${result.products.length} scene(s) found · Source: ${result.source}.`
+        : `No Sentinel-1 scenes found for this area and time period · Source: ${result.source}.`;
+      if (!result.products?.length) {
+        addSceneText(satelliteSearchResults, 'satellite-search-note', 'Try a wider date range or another map area. No imagery is available for the selected search window.');
+      }
+    } catch (error) {
+      satelliteSearchStatus.textContent = `Imagery search unavailable: ${error.message}`;
+    } finally {
+      button.disabled = false;
+    }
+  });
+
+  geotiffInput?.addEventListener('change', () => {
+    runDetectionButton.disabled = !geotiffInput.files?.[0] || !selectedSatelliteScene;
+    detectionResult.hidden = true;
+  });
+
+  runDetectionButton?.addEventListener('click', async () => {
+    const file = geotiffInput.files?.[0];
+    if (!file || !selectedSatelliteScene) return;
+    if (file.size > 100 * 1024 * 1024) {
+      detectionResult.hidden = false;
+      detectionResult.textContent = 'Selected GeoTIFF exceeds the 100 MB upload limit.';
+      return;
+    }
+
+    const params = new URLSearchParams({ scene_id: selectedSatelliteScene.id });
+    if (selectedSatelliteScene.acquisition_start) {
+      params.set('acquisition_time', selectedSatelliteScene.acquisition_start);
+    }
+    runDetectionButton.disabled = true;
+    detectionResult.hidden = false;
+    detectionResult.textContent = 'Uploading GeoTIFF and running detection…';
+    try {
+      const response = await fetch(apiUrl(`/api/detect/image?${params}`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'image/tiff' },
+        body: file,
+        signal: AbortSignal.timeout(120000)
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail || `Detector returned HTTP ${response.status}`);
+      detectionResult.textContent = JSON.stringify(result, null, 2);
+    } catch (error) {
+      detectionResult.textContent = `Detection unavailable: ${error.message}`;
+    } finally {
+      runDetectionButton.disabled = false;
+    }
+  });
+
+  function scheduleLiveVesselFetch() {
+    if (state.liveVesselRefreshTimeout) clearTimeout(state.liveVesselRefreshTimeout);
+    state.liveVesselRefreshTimeout = setTimeout(() => {
+      state.liveVesselRefreshTimeout = null;
+      fetchLiveVesselPositions();
+    }, 250);
+  }
+
+  function updateLiveVesselMarkers(vessels, feedSource) {
     state.layers.liveVessels.clearLayers();
 
     vessels.forEach(v => {
-      if (!v.lat || !v.lon) return;
+      if (!Number.isFinite(v.lat) || !Number.isFinite(v.lon)) return;
+
+      if (Array.isArray(v.trackHistory) && v.trackHistory.length > 1) {
+        L.polyline(v.trackHistory, {
+          color: '#00D4FF',
+          weight: 2,
+          opacity: 0.8
+        }).addTo(state.layers.liveVessels);
+      }
 
       // Ship-shaped SVG icon
       const vesselIcon = L.divIcon({
         className: 'sg-live-vessel-icon',
-        html: `<div class="sg-vessel-dot" style="transform:rotate(${v.heading || 0}deg);" title="${v.name || 'Vessel'}">
+        html: `<div class="sg-vessel-dot" style="transform:rotate(${v.heading || 0}deg);">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
             <path d="M12 2L6 18H18L12 2Z" fill="#00D4FF" fill-opacity="0.9" stroke="#FFFFFF" stroke-width="1.5" stroke-linejoin="round"/>
             <rect x="10" y="16" width="4" height="4" rx="1" fill="#00D4FF" stroke="#FFFFFF" stroke-width="0.8"/>
@@ -706,14 +943,20 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       const marker = L.marker([v.lat, v.lon], { icon: vesselIcon }).addTo(state.layers.liveVessels);
 
-      marker.bindPopup(
-        `<div style="color:#0b1220;font-size:12px;line-height:1.6;min-width:160px;">
-          <strong>${v.name || 'Unknown Vessel'}</strong><br>
-          <span style="font-family:monospace;font-size:11px;">MMSI: ${v.mmsi}</span><br>
-          Speed: ${v.speed} kt &nbsp;|&nbsp; Heading: ${v.heading}°<br>
-          <span style="color:#888;font-size:10px;">Live AIS • Updated ${new Date().toLocaleTimeString()}</span>
-        </div>`
-      );
+      const popup = document.createElement('div');
+      popup.style.cssText = 'color:#0b1220;font-size:12px;line-height:1.6;min-width:160px;';
+      const name = document.createElement('strong');
+      name.textContent = v.name || 'Unknown Vessel';
+      const mmsi = document.createElement('span');
+      mmsi.style.cssText = 'font-family:monospace;font-size:11px;';
+      mmsi.textContent = `MMSI: ${v.mmsi}`;
+      const details = document.createElement('div');
+      details.textContent = `Speed: ${v.speed ?? 'N/A'} kt | Heading: ${v.heading ?? 'N/A'}°`;
+      const source = document.createElement('span');
+      source.style.cssText = 'color:#888;font-size:10px;';
+      source.textContent = `${feedSource} • ${v.lastSeen ? new Date(v.lastSeen).toLocaleString() : new Date().toLocaleTimeString()}`;
+      popup.append(name, document.createElement('br'), mmsi, details, source);
+      marker.bindPopup(popup);
     });
   }
 
@@ -792,6 +1035,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Region Selector
   document.getElementById('region-selector')?.addEventListener('change', async (e) => {
     const val = e.target.value;
+    if (val === 'global') {
+      state.currentRegion = val;
+      ++state.regionRequestId;
+      state.analysisData.drift = null;
+      state.analysisData.originZone = null;
+      updateRegionUI(val);
+      return;
+    }
+
     const reg = SPILLGUARD_DATA.regions[val];
     if (!reg || !validateRegionConfig(val, reg)) {
       console.warn(`Unknown or invalid region selected: ${val}`);
@@ -804,16 +1056,18 @@ document.addEventListener('DOMContentLoaded', async () => {
     state.analysisData.originZone = null;
     updateRegionUI(val);
 
-    try {
-      const resp = await fetch(apiUrl(`/api/regions/${val}`), { cache: 'no-store' });
-      if (resp.ok && requestId === state.regionRequestId && state.currentRegion === val) {
-        const regionData = await resp.json();
-        if (Array.isArray(regionData.spills)) SPILLGUARD_DATA.regionSpills[val] = regionData.spills;
-        if (Array.isArray(regionData.vessels)) SPILLGUARD_DATA.regionVessels[val] = regionData.vessels;
-        updateRegionUI(val);
+    if (!hasBootstrapData) {
+      try {
+        const resp = await fetch(apiUrl(`/api/regions/${val}`), { cache: 'no-store' });
+        if (resp.ok && requestId === state.regionRequestId && state.currentRegion === val) {
+          const regionData = await resp.json();
+          if (Array.isArray(regionData.spills)) SPILLGUARD_DATA.regionSpills[val] = regionData.spills;
+          if (Array.isArray(regionData.vessels)) SPILLGUARD_DATA.regionVessels[val] = regionData.vessels;
+          updateRegionUI(val);
+        }
+      } catch (err) {
+        console.warn('Region fetch failed, using local demo data.', err);
       }
-    } catch (err) {
-      console.warn('Region fetch failed, using local demo data.', err);
     }
   });
 
@@ -829,8 +1083,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   function getEntitiesForRegion(regionKey, radiusKm = 200) {
-    // Prefer explicit per-region datasets if provided in data.js
-    if (SPILLGUARD_DATA.regionSpills && SPILLGUARD_DATA.regionSpills[regionKey]) {
+    // Keep curated per-region fixtures only for the offline fallback.
+    if (!hasBootstrapData && SPILLGUARD_DATA.regionSpills && SPILLGUARD_DATA.regionSpills[regionKey]) {
       const spills = SPILLGUARD_DATA.regionSpills[regionKey] || [];
       const vessels = SPILLGUARD_DATA.regionVessels && SPILLGUARD_DATA.regionVessels[regionKey]
         ? SPILLGUARD_DATA.regionVessels[regionKey].map(v => ({ ...v, coords: [v.coords ? v.coords[0] : v.lat, v.coords ? v.coords[1] : v.lon] }))
@@ -875,6 +1129,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     const locationEl = document.getElementById('priority-location-txt');
     if (region && locationEl) {
       locationEl.textContent = region.name;
+    } else if (regionKey === 'global' && locationEl) {
+      locationEl.textContent = 'Global View';
     }
   }
 
@@ -886,14 +1142,14 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     if (!primary) {
       if (incidentIdEl) incidentIdEl.textContent = 'No incidents';
-      if (locationEl) locationEl.textContent = region ? region.name : 'No active region';
+      if (locationEl) locationEl.textContent = region ? region.name : (regionKey === 'global' ? 'Global View' : 'No active region');
       if (miniVals) miniVals.forEach((el, idx) => { el.textContent = idx === 0 ? '0 km²' : '—'; });
       return;
     }
 
     if (incidentIdEl) incidentIdEl.textContent = (primary.id ? `#${primary.id}` : 'Incident') + (primary.title ? `: ${primary.title}` : '');
     if (locationEl) {
-      locationEl.textContent = region && region.name ? region.name : (primary.locationDesc || primary.title || 'Selected region');
+      locationEl.textContent = region && region.name ? region.name : (regionKey === 'global' ? 'Global View' : (primary.locationDesc || primary.title || 'Selected region'));
     }
 
     if (miniVals && miniVals.length >= 4) {
@@ -905,6 +1161,21 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   function updateRegionUI(regionKey) {
+    if (regionKey === 'global') {
+      const spills = SPILLGUARD_DATA.spills || [];
+      const vessels = SPILLGUARD_DATA.vessels || [];
+      syncRegionHeader(regionKey);
+      applyIncidentCard(spills[0] || null, regionKey);
+
+      if (state.map) {
+        renderMapData(spills, vessels);
+        renderMaritimeCorridor();
+        state.map.setView([20, 0], 2);
+        if (state.layers.liveVessels && state.map.hasLayer(state.layers.liveVessels)) fetchLiveVesselPositions();
+      }
+      return;
+    }
+
     const region = SPILLGUARD_DATA.regions[regionKey];
     if (!region || !validateRegionConfig(regionKey, region)) return;
     const { spills, vessels } = getEntitiesForRegion(regionKey);
@@ -1156,7 +1427,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   btnInspectPriority?.addEventListener('click', () => {
     const activeRegionKey = btnInspectPriority.dataset.region || state.currentRegion || 'malacca';
-    const regionalSpills = SPILLGUARD_DATA.regionSpills?.[activeRegionKey] || SPILLGUARD_DATA.spills || [];
+    const regionalSpills = getEntitiesForRegion(activeRegionKey).spills;
     const preferredSpillId = btnInspectPriority.dataset.spillId || state.selectedSpill?.id;
     const activeSpill = regionalSpills.find(spill => spill.id === preferredSpillId)
       || regionalSpills[0]
@@ -2063,7 +2334,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   document.getElementById('btn-case-review')?.addEventListener('click', () => {
     const regionKey = state.currentRegion || 'malacca';
-    const localSpills = SPILLGUARD_DATA.regionSpills?.[regionKey] || SPILLGUARD_DATA.spills || [];
+    const localSpills = getEntitiesForRegion(regionKey).spills;
     const selected = localSpills[0] || state.selectedSpill || SPILLGUARD_DATA.spills?.[0];
     if (!selected) return;
 
@@ -2075,6 +2346,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   document.getElementById('btn-reset-view')?.addEventListener('click', () => {
+    if (state.currentRegion === 'global') {
+      updateRegionUI('global');
+      return;
+    }
+
     const region = SPILLGUARD_DATA.regions[state.currentRegion];
     if (!region || !state.map) return;
     updateRegionUI(state.currentRegion);

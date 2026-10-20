@@ -22,11 +22,18 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+.venv/
+.venv*/
+venv/
+env/
 
 # Database
 *.db
 spillguard.db
 server/spillguard.db
+
+# Model checkpoints
+server/checkpoints/*.pth
 
 # IDE
 .vscode/

@@ -1,24 +1,48 @@
 """Spill Sense HTTP API and static-site server."""
 
+import asyncio
 import math
 import json
 import os
 import base64
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.request import Request as UrlRequest, urlopen
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Query
+import psycopg
+from pydantic import ValidationError
+from psycopg_pool import PoolTimeout
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 try:
-    from server.ml_detector import model_status, run_detection
+    from server.aisstream import aisstream_status, run_aisstream
+except ImportError:  # pragma: no cover - direct script execution
+    from aisstream import aisstream_status, run_aisstream
+
+try:
+    from server.satellite_catalog import SatelliteCatalogUnavailable, search_sentinel1
+except ImportError:  # pragma: no cover - direct script execution
+    from satellite_catalog import SatelliteCatalogUnavailable, search_sentinel1
+
+try:
+    from server.ml_detector import model_status, run_detection, run_detection_on_geotiff
 except ImportError:  # pragma: no cover - optional import
     model_status = None
     run_detection = None
+    run_detection_on_geotiff = None
+
+try:
+    from server.drift import (
+        DriftDataUnavailable,
+        backtrack_slick,
+        fetch_environmental_drift,
+    )
+except ImportError:  # pragma: no cover - direct script execution
+    from drift import DriftDataUnavailable, backtrack_slick, fetch_environmental_drift
 
 try:  # Quick Spill Alert evaluation engine
     from server.alerts import (
@@ -37,9 +61,13 @@ except ImportError:  # pragma: no cover - direct script execution
 try:
     from server.database import (
         add_vessel_note,
+        check_database_connection,
+        close_connection_pool,
         get_vessel_notes,
         init_db,
         query_analytics,
+        query_ais_vessels,
+        query_ais_positions_for_attribution,
         query_investigation,
         query_spill_by_id,
         query_spills,
@@ -52,15 +80,21 @@ try:
         MatchVesselsRequest,
         RankSuspectsRequest,
         VesselNoteCreate,
+        AISPointModel,
         SarAisCorrelateRequest,
+        SarAisCandidateRequest,
         QuickAlertEvaluateRequest,
     )
 except ImportError:  # pragma: no cover - fallback for direct script execution
     from database import (
         add_vessel_note,
+        check_database_connection,
+        close_connection_pool,
         get_vessel_notes,
         init_db,
         query_analytics,
+        query_ais_vessels,
+        query_ais_positions_for_attribution,
         query_investigation,
         query_spill_by_id,
         query_spills,
@@ -73,10 +107,14 @@ except ImportError:  # pragma: no cover - fallback for direct script execution
         MatchVesselsRequest,
         RankSuspectsRequest,
         VesselNoteCreate,
+        AISPointModel,
+        SarAisCorrelateRequest,
+        SarAisCandidateRequest,
         QuickAlertEvaluateRequest,
     )
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
+MAX_SATELLITE_UPLOAD_BYTES = 100 * 1024 * 1024
 
 app = FastAPI(title="Spill Sense API", version="1.0.0")
 app.add_middleware(
@@ -85,8 +123,8 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-AIS-Data-Source"],
 )
-
 
 def parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
     if value is None:
@@ -137,13 +175,56 @@ def dead_reckon_position(lat: float, lon: float, heading_deg: float, speed_knots
 def startup() -> None:
     try:
         init_db()
-    except Exception as exc:
+    except psycopg.Error as exc:
         print(f"Database unavailable; continuing with API-only features: {exc}")
+
+
+@app.on_event("startup")
+async def start_aisstream() -> None:
+    api_key = os.getenv("AISSTREAM_API_KEY", "").strip()
+    if not api_key:
+        return
+    app.state.aisstream_task = asyncio.create_task(run_aisstream(api_key))
+
+
+@app.on_event("shutdown")
+async def stop_aisstream() -> None:
+    task = getattr(app.state, "aisstream_task", None)
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    await asyncio.to_thread(close_connection_pool)
 
 
 @app.get("/api/health")
 def health() -> dict:
     return {"status": "ok"}
+
+
+@app.get("/api/database/status")
+def database_status() -> dict:
+    if not os.getenv("DATABASE_URL", "").strip():
+        raise HTTPException(status_code=503, detail="DATABASE_URL is not configured.")
+    try:
+        return check_database_connection()
+    except psycopg.Error as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"PostgreSQL connection failed: {type(exc).__name__}. Check DATABASE_URL, network access, and the database password.",
+        ) from exc
+
+
+@app.get("/api/ais/status")
+def ais_status() -> dict:
+    status = aisstream_status()
+    return {
+        **status,
+        "configured": bool(os.getenv("AISSTREAM_API_KEY", "").strip()),
+        "provider": "AISStream",
+    }
 
 
 @app.post("/api/emergency-alerts/transmit")
@@ -169,7 +250,7 @@ def transmit_emergency_alert(payload: Dict[str, Any]) -> dict:
                 f"Area {payload.get('area', 'unknown')}; confidence {payload.get('confidence', 'unknown')}. "
                 f"Alert {payload.get('alertId', 'unknown')}. Verify in field."
             )
-            request = Request(
+            request = UrlRequest(
                 f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json",
                 data=urlencode({
                     "To": os.environ["EMERGENCY_SMS_TO"],
@@ -184,7 +265,7 @@ def transmit_emergency_alert(payload: Dict[str, Any]) -> dict:
             endpoint = os.getenv(endpoint_name, "")
             if not endpoint.startswith("https://"):
                 raise HTTPException(status_code=503, detail=f"{method} delivery is not configured. Set Twilio variables or {endpoint_name}.")
-            request = Request(
+            request = UrlRequest(
                 endpoint,
                 data=json.dumps({"method": method, "payload": payload}).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
@@ -238,6 +319,289 @@ def detect_demo(
         raise HTTPException(status_code=500, detail=f"Detection pipeline error: {exc}") from exc
 
 
+@app.post("/api/detect/image")
+async def detect_satellite_image(
+    request: Request,
+    backscatter_min_db: float = Query(default=-30.0),
+    backscatter_max_db: float = Query(default=0.0),
+    threshold: float = Query(default=0.5, ge=0.0, le=1.0),
+    scene_id: Optional[str] = None,
+    acquisition_time: Optional[datetime] = None,
+) -> dict:
+    """Run the U-Net on a single-band calibrated Sentinel-1 GeoTIFF upload."""
+    if run_detection_on_geotiff is None:
+        raise HTTPException(status_code=503, detail="GeoTIFF detector is unavailable.")
+    content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if content_type not in {"image/tiff", "image/geotiff", "application/octet-stream"}:
+        raise HTTPException(
+            status_code=415,
+            detail="Upload the GeoTIFF as a binary request body with Content-Type image/tiff.",
+        )
+
+    geotiff_data = bytearray()
+    async for chunk in request.stream():
+        if len(geotiff_data) + len(chunk) > MAX_SATELLITE_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="GeoTIFF upload exceeds the 100 MB limit.")
+        geotiff_data.extend(chunk)
+
+    if scene_id and len(scene_id) > 200:
+        raise HTTPException(status_code=400, detail="scene_id must be 200 characters or fewer.")
+    if acquisition_time and (
+        acquisition_time.tzinfo is None or acquisition_time.utcoffset() is None
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="acquisition_time must include a timezone.",
+        )
+
+    try:
+        result = run_detection_on_geotiff(
+            bytes(geotiff_data),
+            backscatter_min_db=backscatter_min_db,
+            backscatter_max_db=backscatter_max_db,
+            threshold=threshold,
+        )
+        if scene_id or acquisition_time:
+            if not isinstance(result.get("input"), dict):
+                result["input"] = {}
+            if scene_id:
+                result["input"]["scene_id"] = scene_id
+                result["input"]["catalog_source"] = "Alaska Satellite Facility (ASF) DAAC"
+            if acquisition_time:
+                result["input"]["acquisition_time"] = acquisition_time.astimezone(timezone.utc).isoformat()
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Detection pipeline error: {exc}") from exc
+
+
+@app.get("/api/satellite/sentinel1")
+def sentinel1_scenes(
+    min_lat: float = Query(ge=-90, le=90),
+    min_lon: float = Query(ge=-180, le=180),
+    max_lat: float = Query(ge=-90, le=90),
+    max_lon: float = Query(ge=-180, le=180),
+    start: datetime = Query(..., description="Timezone-aware start of the acquisition search window."),
+    end: datetime = Query(..., description="Timezone-aware end of the acquisition search window."),
+    limit: int = Query(default=25, ge=1, le=50),
+) -> dict:
+    try:
+        return search_sentinel1(
+            min_lat, min_lon, max_lat, max_lon, start, end, limit
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except SatelliteCatalogUnavailable as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/api/detect/image/candidates")
+async def detect_satellite_image_candidates(
+    request: Request,
+    sar_time: str = Query(..., description="Timezone-aware SAR acquisition time in ISO-8601 format."),
+    backscatter_min_db: float = Query(default=-30.0),
+    backscatter_max_db: float = Query(default=0.0),
+    threshold: float = Query(default=0.5, ge=0.0, le=1.0),
+    time_window_minutes: int = Query(default=30, ge=1, le=180),
+    search_radius_km: float = Query(default=50.0, gt=0.0, le=200.0),
+    candidate_limit: int = Query(default=200, ge=1, le=500),
+    drift_hours: int = Query(default=12, ge=6, le=48),
+    drift_uncertainty_km: float = Query(default=5.0, ge=0.0, le=100.0),
+    windage_coefficient: float = Query(default=0.03, ge=0.0, le=0.1),
+) -> dict:
+    """Run GeoTIFF detection, backtrack each slick, then search AIS candidates."""
+    acquisition_time = parse_iso_datetime(sar_time)
+    if acquisition_time is None:
+        raise HTTPException(status_code=400, detail="sar_time is required")
+    parsed_time = datetime.fromisoformat(sar_time.replace("Z", "+00:00"))
+    if parsed_time.tzinfo is None:
+        raise HTTPException(status_code=400, detail="sar_time must include a UTC offset")
+    if drift_hours not in {6, 12, 24, 48}:
+        raise HTTPException(
+            status_code=422,
+            detail="drift_hours must be one of 6, 12, 24, or 48.",
+        )
+    if run_detection_on_geotiff is None:
+        raise HTTPException(status_code=503, detail="GeoTIFF detector is unavailable.")
+
+    content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if content_type not in {"image/tiff", "image/geotiff", "application/octet-stream"}:
+        raise HTTPException(
+            status_code=415,
+            detail="Upload the GeoTIFF as a binary request body with Content-Type image/tiff.",
+        )
+
+    geotiff_data = bytearray()
+    async for chunk in request.stream():
+        if len(geotiff_data) + len(chunk) > MAX_SATELLITE_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="GeoTIFF upload exceeds the 100 MB limit.")
+        geotiff_data.extend(chunk)
+
+    try:
+        detection = run_detection_on_geotiff(
+            bytes(geotiff_data),
+            backscatter_min_db=backscatter_min_db,
+            backscatter_max_db=backscatter_max_db,
+            threshold=threshold,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Detection pipeline error: {exc}") from exc
+
+    clusters = detection.get("clusters")
+    if not isinstance(clusters, list):
+        raise HTTPException(
+            status_code=500,
+            detail="Detector response is missing the expected clusters list.",
+        )
+
+    cluster_attributions = []
+    for cluster in clusters:
+        centroid = cluster.get("centroid") if isinstance(cluster, dict) else None
+        if (
+            not isinstance(centroid, (list, tuple))
+            or len(centroid) != 2
+        ):
+            raise HTTPException(
+                status_code=500,
+                detail="Detector returned a cluster without a valid [latitude, longitude] centroid.",
+            )
+        if not -90 <= centroid[0] <= 90 or not -180 <= centroid[1] <= 180:
+            raise HTTPException(
+                status_code=500,
+                detail="Detector returned a cluster centroid outside geographic bounds.",
+            )
+
+        candidate_lat = centroid[0]
+        candidate_lon = centroid[1]
+        candidate_time = sar_time
+        candidate_radius_km = search_radius_km
+        drift_details: Dict[str, Any] = {
+            "status": "unavailable",
+            "provider": "Open-Meteo Marine API + Weather Forecast API",
+            "reason": None,
+        }
+        try:
+            samples = await asyncio.to_thread(
+                fetch_environmental_drift,
+                centroid[0],
+                centroid[1],
+                acquisition_time,
+                drift_hours,
+            )
+            backtracked = backtrack_slick(
+                centroid[0],
+                centroid[1],
+                acquisition_time,
+                drift_hours,
+                samples,
+                windage_coefficient,
+            )
+            candidate_lat = backtracked.source_lat
+            candidate_lon = backtracked.source_lon
+            candidate_time = backtracked.source_time.isoformat()
+            candidate_radius_km = min(200.0, search_radius_km + drift_uncertainty_km)
+            drift_details = {
+                "status": "corrected",
+                "provider": "Open-Meteo Marine API + Weather Forecast API",
+                "method": "hourly backward integration of current plus windage",
+                "direction_convention": (
+                    "Current direction is treated as flow-toward; meteorological "
+                    "wind direction is reversed to downwind."
+                ),
+                "sample_count": len(samples),
+                "backtrack_hours": drift_hours,
+                "windage_coefficient": windage_coefficient,
+                "estimated_release_time": candidate_time,
+                "estimated_source": {
+                    "lat": round(candidate_lat, 6),
+                    "lon": round(candidate_lon, 6),
+                },
+                "estimated_displacement_km": round(backtracked.displacement_km, 3),
+                "integrated_path_length_km": round(backtracked.path_length_km, 3),
+                "search_uncertainty_km": drift_uncertainty_km,
+                "path": backtracked.path,
+                "limitations": (
+                    "Environmental vectors are sampled at the observed slick "
+                    "location and do not vary spatially along the backtracked path."
+                ),
+            }
+        except DriftDataUnavailable as exc:
+            drift_details["reason"] = str(exc)
+
+        try:
+            candidate_response = sar_ais_candidates(
+                SarAisCandidateRequest(
+                    sar_time=candidate_time,
+                    sar_lat=candidate_lat,
+                    sar_lon=candidate_lon,
+                    time_window_minutes=time_window_minutes,
+                    search_radius_km=candidate_radius_km,
+                    limit=candidate_limit,
+                )
+            )
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail="Detector returned a cluster centroid outside geographic bounds.",
+            ) from exc
+        cluster_attributions.append(
+            {
+                "cluster_id": cluster.get("cluster_id"),
+                "centroid": centroid,
+                "candidate_search_target": {
+                    "lat": round(candidate_lat, 6),
+                    "lon": round(candidate_lon, 6),
+                    "time": candidate_time,
+                },
+                "drift": drift_details,
+                "candidate_count": candidate_response["candidate_count"],
+                "candidates": candidate_response["candidates"],
+                "search": candidate_response["search"],
+            }
+        )
+
+    return {
+        **detection,
+        "ais_attribution": {
+            "sar_acquisition_time": acquisition_time.isoformat(),
+            "clusters": cluster_attributions,
+            "validation_status": "not_validated_for_operational_use",
+            "drift_corrected": bool(cluster_attributions) and all(
+                group["drift"]["status"] == "corrected"
+                for group in cluster_attributions
+            ),
+            "drift_model": {
+                "provider": "Open-Meteo Marine API + Weather Forecast API",
+                "windage_coefficient": windage_coefficient,
+                "backtrack_hours": drift_hours,
+                "uncertainty_km": drift_uncertainty_km,
+                "uncertainty_note": (
+                    "The search uncertainty is a configurable analyst buffer, "
+                    "not a statistical confidence interval."
+                ),
+                "spatial_sampling_note": (
+                    "Hourly environmental vectors are sampled at each slick "
+                    "centroid and held spatially constant during backtracking."
+                ),
+            },
+            "warning": (
+                "The current detector has not passed compatible real "
+                "Sentinel-1 validation; vessel rankings are exploratory and "
+                "must not be used operationally. Drift-corrected positions and "
+                "nearby vessels are estimates/candidates only, not proof of "
+                "spill causation."
+            ),
+        },
+    }
+
+
 @app.get("/api/bootstrap")
 def bootstrap() -> dict:
     """Return all dashboard data required for the initial page load."""
@@ -265,6 +629,23 @@ def spill(spill_id: str) -> dict:
 @app.get("/api/vessels")
 def vessels(filter_type: Optional[str] = None, search: Optional[str] = None) -> list[dict]:
     return query_vessels(filter_type, search)
+
+
+@app.get("/api/ais/vessels")
+def ais_vessels(
+    response: Response,
+    min_lat: float = Query(ge=-90, le=90),
+    min_lon: float = Query(ge=-180, le=180),
+    max_lat: float = Query(ge=-90, le=90),
+    max_lon: float = Query(ge=-180, le=180),
+    limit: int = Query(default=200, ge=1, le=200),
+    track_hours: int = Query(default=6, ge=1, le=24),
+) -> list[dict]:
+    if min_lat > max_lat or min_lon > max_lon:
+        raise HTTPException(status_code=400, detail="Minimum bounds must not exceed maximum bounds.")
+    vessels, data_source = query_ais_vessels(min_lat, min_lon, max_lat, max_lon, limit, track_hours)
+    response.headers["X-AIS-Data-Source"] = data_source
+    return vessels
 
 
 @app.get("/api/vessels/{imo}/notes")
@@ -385,13 +766,13 @@ def sar_ais_correlate(payload: SarAisCorrelateRequest) -> dict:
             time_seconds = (sar_time - ais_time).total_seconds()
             time_diff_minutes = abs(time_seconds) / 60.0
 
-        # only consider within ±30 minutes
-        if time_diff_minutes is None or time_diff_minutes > 30.0:
+        # Ignore observations outside the requested acquisition window.
+        if time_diff_minutes is None or time_diff_minutes > payload.time_window_minutes:
             continue
 
         # dead-reckon/interpolate to SAR time
         pred = None
-        if rec.heading is not None and rec.speed_knots is not None:
+        if rec.heading is not None and rec.speed_knots is not None and time_seconds is not None:
             pred = dead_reckon_position(rec.lat, rec.lon, rec.heading, rec.speed_knots, time_seconds)
         else:
             pred = {"lat": rec.lat, "lon": rec.lon}
@@ -403,8 +784,8 @@ def sar_ais_correlate(payload: SarAisCorrelateRequest) -> dict:
         dist_norm = max(0.0, min(1.0, 1.0 - (distance_km / 20.0)))
         distance_score = dist_norm * 100.0
 
-        # time quality: 0..30min -> 100..0
-        time_quality = max(0.0, min(1.0, 1.0 - (time_diff_minutes / 30.0))) * 100.0 if time_diff_minutes is not None else 0.0
+        # Time quality falls linearly to zero at the edge of the search window.
+        time_quality = max(0.0, min(1.0, 1.0 - (time_diff_minutes / payload.time_window_minutes))) * 100.0 if time_diff_minutes is not None else 0.0
 
         # heading diff: if SAR heading provided, compute angle diff between SAR heading and AIS heading
         heading_score = 50.0
@@ -457,7 +838,10 @@ def sar_ais_correlate(payload: SarAisCorrelateRequest) -> dict:
     if not results:
         return {
             "results": [],
-            "message": "No AIS records within ±30 minutes of SAR acquisition. Possible AIS-dark vessel.",
+            "message": (
+                f"No AIS records within ±{payload.time_window_minutes} minutes "
+                "of SAR acquisition. Possible AIS-dark vessel."
+            ),
             "warning": "Investigation support, not final proof.",
         }
 
@@ -473,6 +857,88 @@ def sar_ais_correlate(payload: SarAisCorrelateRequest) -> dict:
         "best_match": top,
         "results": results,
         "warning": "Investigation support, not final proof.",
+    }
+
+
+@app.post("/api/sar-ais/candidates")
+def sar_ais_candidates(payload: SarAisCandidateRequest) -> dict:
+    """Find stored AIS observations near a SAR target for investigative review."""
+    sar_time = parse_iso_datetime(payload.sar_time)
+    if sar_time is None:
+        raise HTTPException(status_code=400, detail="sar_time is required")
+    if datetime.fromisoformat(payload.sar_time.replace("Z", "+00:00")).tzinfo is None:
+        raise HTTPException(status_code=400, detail="sar_time must include a UTC offset")
+
+    try:
+        positions = query_ais_positions_for_attribution(
+            sar_time=sar_time,
+            sar_lat=payload.sar_lat,
+            sar_lon=payload.sar_lon,
+            time_window_minutes=payload.time_window_minutes,
+            search_radius_km=payload.search_radius_km,
+            limit=payload.limit,
+        )
+    except (psycopg.Error, PoolTimeout, OSError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="AIS candidate search is unavailable because the database query failed.",
+        ) from exc
+
+    ais_records = [
+        AISPointModel(
+            mmsi=str(row["mmsi"]),
+            vessel_name=row.get("vessel_name") or "Unknown",
+            lat=float(row["latitude"]),
+            lon=float(row["longitude"]),
+            timestamp=row["observed_at"].isoformat(),
+            speed_knots=row.get("speed_knots"),
+            heading=row.get("course_degrees"),
+            vessel_type=row.get("vessel_type"),
+        )
+        for row in positions
+    ]
+    correlation = sar_ais_correlate(
+        SarAisCorrelateRequest(
+            sar_time=payload.sar_time,
+            sar_lat=payload.sar_lat,
+            sar_lon=payload.sar_lon,
+            sar_heading=payload.sar_heading,
+            sar_length_m=payload.sar_length_m,
+            ais_records=ais_records,
+            time_window_minutes=payload.time_window_minutes,
+        )
+    )
+
+    candidates = []
+    for result in correlation["results"]:
+        candidate = {key: value for key, value in result.items() if key != "matched"}
+        candidate["review_priority"] = (
+            "higher" if result["matched"] else "unranked_candidate"
+        )
+        candidates.append(candidate)
+
+    return {
+        "sar_target": {
+            "lat": payload.sar_lat,
+            "lon": payload.sar_lon,
+            "time": sar_time.isoformat(),
+        },
+        "candidate_count": len(candidates),
+        "candidates": candidates,
+        "score_type": "heuristic_match_score_not_probability",
+        "search": {
+            "time_window_minutes": payload.time_window_minutes,
+            "search_radius_km": payload.search_radius_km,
+        },
+        "drift_corrected": False,
+        "drift_note": (
+            "No observed environmental drift data was applied; candidates are "
+            "ranked using AIS timing and proximity only."
+        ),
+        "warning": (
+            "Nearby vessels are investigative candidates only. Proximity and "
+            "heuristic scores do not establish spill causation."
+        ),
     }
 
 

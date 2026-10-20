@@ -97,6 +97,18 @@ class SarAisCorrelateRequest(BaseModel):
     sar_heading: Optional[float] = None
     sar_length_m: Optional[float] = None
     ais_records: List[AISPointModel]
+    time_window_minutes: int = Field(default=30, ge=1, le=180)
+
+
+class SarAisCandidateRequest(BaseModel):
+    sar_time: str
+    sar_lat: float = Field(..., ge=-90, le=90)
+    sar_lon: float = Field(..., ge=-180, le=180)
+    sar_heading: Optional[float] = Field(default=None, ge=0, le=360)
+    sar_length_m: Optional[float] = Field(default=None, gt=0)
+    time_window_minutes: int = Field(default=30, ge=1, le=180)
+    search_radius_km: float = Field(default=50.0, gt=0, le=200)
+    limit: int = Field(default=200, ge=1, le=500)
 
 
 class RankSuspectVesselModel(BaseModel):
